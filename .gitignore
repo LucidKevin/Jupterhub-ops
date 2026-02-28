@@ -1,0 +1,25 @@
+# 依赖
+node_modules/*
+
+# Next.js 构建输出
+.next/
+out/
+
+# TypeScript 增量构建缓存
+tsconfig.tsbuildinfo
+next-env.d.ts
+
+# 环境变量（含敏感信息，不提交）
+.env
+.env.local
+.env.*.local
+
+# macOS 系统文件
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+
+# pnpm
+.pnpm-store/
