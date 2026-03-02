@@ -4,11 +4,16 @@
  * 通过在服务端执行 `docker node ls` 获取 Docker Swarm 集群节点列表，
  * 并结合 src/config/cluster.ts 中的配置补全显示名称、IP、角色、标签等信息。
  *
+ * 容器数量统计策略：
+ *   - Manager 节点：默认为 1（JupyterHub Hub/Proxy 等基础服务）
+ *   - Worker 节点：通过 `ssh -p 39000 root@<ip> 'docker ps -q | wc -l'` 获取实际运行容器数
+ *
  * 返回示例：
  * {
  *   totalNodes: 4,
  *   managerNodes: 1,
  *   workerNodes: 3,
+ *   totalContainers: 7,
  *   nodes: [
  *     {
  *       id: "9vnsxae28jot4gq4qj2q8smha",
@@ -19,7 +24,8 @@
  *       status: "Ready",
  *       availability: "Active",
  *       managerStatus: "Leader",
- *       labels: ["manager", "nfs-server"]
+ *       labels: ["manager", "nfs-server"],
+ *       containers: 1
  *     },
  *     ...
  *   ]
@@ -41,6 +47,21 @@ interface DockerNode {
   Status: string;        // Ready | Down
   Availability: string;  // Active | Pause | Drain
   ManagerStatus: string; // Leader | Reachable | ""（worker 为空）
+}
+
+/**
+ * 通过 SSH 获取指定 worker 节点上正在运行的 Docker 容器数量。
+ * 连接超时 5 秒，失败时返回 0（不阻塞整体响应）。
+ */
+async function getWorkerContainerCount(ip: string): Promise<number> {
+  try {
+    const { stdout } = await execAsync(
+      `ssh -p 39000 -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@${ip} 'docker ps -q | wc -l'`
+    );
+    return parseInt(stdout.trim(), 10) || 0;
+  } catch {
+    return 0;
+  }
 }
 
 export async function GET() {
@@ -67,7 +88,7 @@ export async function GET() {
     const workerNodes = totalNodes - managerNodes;
 
     // 用 cluster.ts 配置补全 docker 输出中没有的字段（IP、displayName、role、labels）
-    const nodes = dockerNodes.map((dockerNode) => {
+    const enriched = dockerNodes.map((dockerNode) => {
       const config = CLUSTER_NODES_CONFIG.find((c) => c.hostname === dockerNode.Hostname);
       return {
         id: dockerNode.ID,
@@ -82,7 +103,20 @@ export async function GET() {
       };
     });
 
-    return NextResponse.json({ totalNodes, managerNodes, workerNodes, nodes });
+    // 并发获取各 worker 节点容器数（manager 默认为 1）
+    const nodes = await Promise.all(
+      enriched.map(async (node) => {
+        const containers =
+          node.role === 'manager'
+            ? 1
+            : await getWorkerContainerCount(node.ip);
+        return { ...node, containers };
+      })
+    );
+
+    const totalContainers = nodes.reduce((sum, n) => sum + n.containers, 0);
+
+    return NextResponse.json({ totalNodes, managerNodes, workerNodes, totalContainers, nodes });
   } catch (error) {
     console.error('Failed to get docker nodes:', error);
     return NextResponse.json({ error: 'Failed to get cluster nodes' }, { status: 500 });

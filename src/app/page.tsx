@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { 
   LayoutDashboard, 
   Server, 
@@ -44,10 +44,10 @@ interface NodeData {
 // 节点显示配置（与 src/config/cluster.ts 保持同步）
 // 作为初始占位数据，确保页面加载时节点列表不为空
 const DASHBOARD_NODE_CONFIG: NodeData[] = [
-  { id: 'node-235', name: '主节点 (10.9.123.235)',   role: 'Manager', status: 'Ready', cpu: 0, memory: 0, disk: 0, ip: '10.9.123.235', containers: 0, labels: ['manager', 'nfs-server'] },
-  { id: 'node-228', name: '计算节点1 (10.9.123.228)', role: 'Worker',  status: 'Ready', cpu: 0, memory: 0, disk: 0, ip: '10.9.123.228', containers: 0, labels: ['worker'] },
-  { id: 'node-229', name: '计算节点2 (10.9.123.229)', role: 'Worker',  status: 'Ready', cpu: 0, memory: 0, disk: 0, ip: '10.9.123.229', containers: 0, labels: ['worker'] },
-  { id: 'node-230', name: '计算节点3 (10.9.123.230)', role: 'Worker',  status: 'Ready', cpu: 0, memory: 0, disk: 0, ip: '10.9.123.230', containers: 0, labels: ['worker'] },
+  { id: 'node-235', name: '主节点 (10.9.123.235)',   role: 'Manager', status: '加载中', cpu: 0, memory: 0, disk: 0, ip: '10.9.123.235', containers: 0, labels: ['manager', 'nfs-server'] },
+  { id: 'node-228', name: '计算节点1 (10.9.123.228)', role: 'Worker',  status: '加载中', cpu: 0, memory: 0, disk: 0, ip: '10.9.123.228', containers: 0, labels: ['worker'] },
+  { id: 'node-229', name: '计算节点2 (10.9.123.229)', role: 'Worker',  status: '加载中', cpu: 0, memory: 0, disk: 0, ip: '10.9.123.229', containers: 0, labels: ['worker'] },
+  { id: 'node-230', name: '计算节点3 (10.9.123.230)', role: 'Worker',  status: '加载中', cpu: 0, memory: 0, disk: 0, ip: '10.9.123.230', containers: 0, labels: ['worker'] },
 ];
 
 export default function JupyterHubDashboard() {
@@ -68,6 +68,8 @@ export default function JupyterHubDashboard() {
   const [avgCpu, setAvgCpu] = useState<number | null>(null);      // 来自 node-metrics API
   const [avgMemory, setAvgMemory] = useState<number | null>(null); // 来自 node-metrics API
   const [metricsLoading, setMetricsLoading] = useState(true);
+  // 刷新成功 toast 提示（true 时显示，3 秒后自动隐藏）
+  const [refreshToast, setRefreshToast] = useState(false);
   /**
    * 节点列表 —— 以 DASHBOARD_NODE_CONFIG 为初始值（静态占位），
    * 页面加载后由 /api/dashboard/cluster-nodes 和 /api/dashboard/node-metrics 的数据更新。
@@ -75,7 +77,7 @@ export default function JupyterHubDashboard() {
   const [nodes, setNodes] = useState<NodeData[]>(DASHBOARD_NODE_CONFIG);
 
   /**
-   * 仪表盘数据拉取 Effect
+   * 仪表盘数据拉取函数（useCallback 避免在 useEffect 依赖中重复创建）
    *
    * 并发请求三个 Dashboard API：
    *   1. /api/dashboard/cluster-nodes    → docker node ls，获取节点状态
@@ -83,79 +85,84 @@ export default function JupyterHubDashboard() {
    *   3. /api/dashboard/node-metrics     → Node Exporter，获取 CPU/内存/磁盘
    *
    * 使用 Promise.allSettled 确保某个 API 失败不影响其他数据渲染。
-   * 每 30 秒自动刷新一次。
    */
-  useEffect(() => {
-    const fetchDashboardData = async () => {
-      setMetricsLoading(true);
-      try {
-        const [nodesRes, containersRes, metricsRes] = await Promise.allSettled([
-          fetch('/api/dashboard/cluster-nodes').then((r) => r.json()),
-          fetch('/api/dashboard/running-containers').then((r) => r.json()),
-          fetch('/api/dashboard/node-metrics').then((r) => r.json()),
-        ]);
+  const fetchDashboardData = useCallback(async () => {
+    setMetricsLoading(true);
+    try {
+      const [nodesRes, containersRes, metricsRes] = await Promise.allSettled([
+        fetch('/api/dashboard/cluster-nodes').then((r) => r.json()),
+        fetch('/api/dashboard/running-containers').then((r) => r.json()),
+        fetch('/api/dashboard/node-metrics').then((r) => r.json()),
+      ]);
 
-        // 提取各 API 的 nodes 数组，失败时为空数组（不中断后续合并）
-        const clusterNodes =
-          nodesRes.status === 'fulfilled' && !nodesRes.value.error
-            ? nodesRes.value.nodes
-            : [];
-        const metricsNodes =
-          metricsRes.status === 'fulfilled' && !metricsRes.value.error
-            ? metricsRes.value.nodes
-            : [];
+      // 提取各 API 的 nodes 数组，失败时为空数组（不中断后续合并）
+      const clusterNodes =
+        nodesRes.status === 'fulfilled' && !nodesRes.value.error
+          ? nodesRes.value.nodes
+          : [];
+      const metricsNodes =
+        metricsRes.status === 'fulfilled' && !metricsRes.value.error
+          ? metricsRes.value.nodes
+          : [];
 
-        // 更新顶部统计卡片数据
-        if (nodesRes.status === 'fulfilled' && !nodesRes.value.error) {
-          setTotalNodes(nodesRes.value.totalNodes);
-          setManagerNodes(nodesRes.value.managerNodes);
-          setWorkerNodes(nodesRes.value.workerNodes);
-        }
-        if (containersRes.status === 'fulfilled' && !containersRes.value.error) {
-          setRunningContainers(containersRes.value.runningContainers);
-          setStoppedContainers(containersRes.value.stoppedContainers);
-        }
-        if (metricsRes.status === 'fulfilled' && !metricsRes.value.error) {
-          setAvgCpu(metricsRes.value.avgCpu);
-          setAvgMemory(metricsRes.value.avgMemory);
-        }
-
-        /**
-         * 节点列表合并策略：
-         * 始终以 DASHBOARD_NODE_CONFIG 为基准（保证 4 个节点始终可见），
-         * - cluster-nodes 成功时更新节点 id 和 status（Ready/Down）
-         * - node-metrics 成功时更新 cpu/memory/disk
-         * - 任一 API 失败时对应字段保留占位值（status: 'Ready', metrics: 0）
-         */
-        const merged: NodeData[] = DASHBOARD_NODE_CONFIG.map((base) => {
-          const cn = clusterNodes.find((n: { ip: string }) => n.ip === base.ip);
-          const m  = metricsNodes.find((n: { ip: string }) => n.ip === base.ip);
-          return {
-            id:         cn?.id        ?? base.id,
-            name:       base.name,
-            role:       base.role,
-            status:     cn?.status    ?? base.status,
-            cpu:        m?.cpuUsage   ?? 0,
-            memory:     m?.memoryUsage ?? 0,
-            disk:       m?.diskUsage  ?? 0,
-            ip:         base.ip,
-            containers: 0,
-            labels:     base.labels,
-          };
-        });
-        setNodes(merged);
-      } catch (err) {
-        console.error('Failed to fetch dashboard data:', err);
-      } finally {
-        setMetricsLoading(false);
+      // 更新顶部统计卡片数据
+      if (nodesRes.status === 'fulfilled' && !nodesRes.value.error) {
+        setTotalNodes(nodesRes.value.totalNodes);
+        setManagerNodes(nodesRes.value.managerNodes);
+        setWorkerNodes(nodesRes.value.workerNodes);
+        // 运行容器总数来自 cluster-nodes（SSH docker ps + manager 默认1）
+        setRunningContainers(nodesRes.value.totalContainers);
       }
-    };
+      if (containersRes.status === 'fulfilled' && !containersRes.value.error) {
+        // stoppedContainers 仍从 JupyterHub API 获取（已停止的用户数）
+        setStoppedContainers(containersRes.value.stoppedContainers);
+      }
+      if (metricsRes.status === 'fulfilled' && !metricsRes.value.error) {
+        setAvgCpu(metricsRes.value.avgCpu);
+        setAvgMemory(metricsRes.value.avgMemory);
+      }
 
+      /**
+       * 节点列表合并策略：
+       * 始终以 DASHBOARD_NODE_CONFIG 为基准（保证 4 个节点始终可见），
+       * - cluster-nodes 成功时更新节点 id、status、containers
+       * - node-metrics 成功时更新 cpu/memory/disk
+       * - API 失败时 status 回退为 '未知'，containers 保留占位值 0
+       */
+      const merged: NodeData[] = DASHBOARD_NODE_CONFIG.map((base) => {
+        const cn = clusterNodes.find((n: { ip: string }) => n.ip === base.ip);
+        const m  = metricsNodes.find((n: { ip: string }) => n.ip === base.ip);
+        return {
+          id:         cn?.id          ?? base.id,
+          name:       base.name,
+          role:       base.role,
+          status:     cn?.status      ?? '未知',
+          cpu:        m?.cpuUsage     ?? 0,
+          memory:     m?.memoryUsage  ?? 0,
+          disk:       m?.diskUsage    ?? 0,
+          ip:         base.ip,
+          containers: cn?.containers  ?? base.containers,
+          labels:     base.labels,
+        };
+      });
+      setNodes(merged);
+
+      // 刷新成功，3 秒后自动隐藏提示
+      setRefreshToast(true);
+      setTimeout(() => setRefreshToast(false), 3000);
+    } catch (err) {
+      console.error('Failed to fetch dashboard data:', err);
+    } finally {
+      setMetricsLoading(false);
+    }
+  }, []);
+
+  // 页面加载后立即拉取，并每 30 秒自动刷新一次
+  useEffect(() => {
     fetchDashboardData();
-    // Refresh every 30 seconds
     const interval = setInterval(fetchDashboardData, 30000);
     return () => clearInterval(interval);
-  }, []);
+  }, [fetchDashboardData]);
 
   // 模拟数据 - 集群状态（用于侧边栏显示）
   const clusterStatus = {
@@ -169,18 +176,12 @@ export default function JupyterHubDashboard() {
     stoppedContainers,
   };
 
-  // 模拟数据 - 服务状态
-  const services = [
-    {
-      name: 'jupyterhub',
-      replicas: 1,
-      runningReplicas: 1,
-      status: 'Running',
-      image: 'myjupyterhub:latest',
-      ports: ['8000:8000'],
-      createdAt: '2024-01-15 10:30:00',
-    },
-  ];
+  // 服务管理状态
+  const [serviceConfig, setServiceConfig] = useState<{ compose: string | null; hubConfig: string | null } | null>(null);
+  const [serviceConfigLoading, setServiceConfigLoading] = useState(false);
+  const [serviceAction, setServiceAction] = useState<'idle' | 'starting' | 'stopping' | 'restarting'>('idle');
+  const [serviceResult, setServiceResult] = useState<{ success: boolean; output: string; error?: string } | null>(null);
+  const [activeConfigTab, setActiveConfigTab] = useState<'compose' | 'hubConfig'>('compose');
 
   // 模拟数据 - 用户管理
   const [users, setUsers] = useState([
@@ -336,6 +337,20 @@ export default function JupyterHubDashboard() {
         return 'text-yellow-500';
       default:
         return 'text-gray-500';
+    }
+  };
+
+  /** Docker node status → 中文显示 + 圆点颜色 */
+  const getNodeStatus = (status: string): { label: string; dotClass: string; textClass: string } => {
+    switch (status) {
+      case 'Ready':
+        return { label: '正常', dotClass: 'bg-green-500', textClass: 'text-green-600' };
+      case 'Down':
+        return { label: '离线', dotClass: 'bg-red-500', textClass: 'text-red-600' };
+      case '加载中':
+        return { label: '加载中', dotClass: 'bg-slate-300 animate-pulse', textClass: 'text-slate-400' };
+      default:
+        return { label: '未知', dotClass: 'bg-slate-400', textClass: 'text-slate-500' };
     }
   };
 
@@ -601,9 +616,12 @@ export default function JupyterHubDashboard() {
         <div className="p-6 border-b border-slate-200">
           <div className="flex items-center justify-between">
             <h3 className="text-lg font-semibold text-slate-900">节点状态</h3>
-            <button className="flex items-center gap-2 px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors">
-              <RefreshCw className="w-4 h-4" />
-              刷新状态
+            <button
+              onClick={fetchDashboardData}
+              disabled={metricsLoading}
+              className="flex items-center gap-2 px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-60">
+              <RefreshCw className={`w-4 h-4 ${metricsLoading ? 'animate-spin' : ''}`} />
+              {metricsLoading ? '刷新中...' : '刷新状态'}
             </button>
           </div>
         </div>
@@ -613,7 +631,7 @@ export default function JupyterHubDashboard() {
               <div key={node.id} className="border border-slate-200 rounded-lg p-4">
                 <div className="flex items-center justify-between mb-4">
                   <div className="flex items-center gap-3">
-                    <div className={`w-3 h-3 rounded-full ${node.status === 'Ready' ? 'bg-green-500' : 'bg-red-500'}`} />
+                    <div className={`w-3 h-3 rounded-full ${getNodeStatus(node.status).dotClass}`} />
                     <div>
                       <p className="font-medium text-slate-900">{node.name}</p>
                       <p className="text-xs text-slate-500">{node.role} | {node.ip}</p>
@@ -626,7 +644,9 @@ export default function JupyterHubDashboard() {
                     </div>
                     <div className="flex items-center gap-2">
                       <Clock className="w-4 h-4 text-slate-400" />
-                      <span>{node.status}</span>
+                      <span className={getNodeStatus(node.status).textClass}>
+                        {getNodeStatus(node.status).label}
+                      </span>
                     </div>
                   </div>
                 </div>
@@ -690,84 +710,139 @@ export default function JupyterHubDashboard() {
     </div>
   );
 
-  const renderServices = () => (
-    <div className="space-y-6">
-      <div className="bg-white rounded-xl shadow-sm border border-slate-200">
-        <div className="p-6 border-b border-slate-200">
-          <div className="flex items-center justify-between">
-            <h3 className="text-lg font-semibold text-slate-900">JupyterHub 服务</h3>
-            <div className="flex gap-2">
-              <button className="flex items-center gap-2 px-4 py-2 text-sm bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors">
-                <Power className="w-4 h-4" />
-                启动服务
-              </button>
-              <button className="flex items-center gap-2 px-4 py-2 text-sm bg-yellow-600 text-white rounded-lg hover:bg-yellow-700 transition-colors">
-                <RefreshCw className="w-4 h-4" />
-                重启服务
-              </button>
-              <button className="flex items-center gap-2 px-4 py-2 text-sm bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors">
-                <PowerOff className="w-4 h-4" />
-                停止服务
-              </button>
+  const renderServices = () => {
+    // 首次切换到服务管理 tab 时加载配置文件
+    if (!serviceConfig && !serviceConfigLoading) {
+      setServiceConfigLoading(true);
+      fetch('/api/dashboard/service/config')
+        .then((r) => r.json())
+        .then((data) => setServiceConfig(data))
+        .catch(() => setServiceConfig({ compose: null, hubConfig: null }))
+        .finally(() => setServiceConfigLoading(false));
+    }
+
+    const handleAction = async (action: 'start' | 'stop' | 'restart') => {
+      setServiceAction(action === 'start' ? 'starting' : action === 'stop' ? 'stopping' : 'restarting');
+      setServiceResult(null);
+      try {
+        const res = await fetch('/api/dashboard/service/action', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action }),
+        });
+        const data = await res.json();
+        setServiceResult(data);
+      } catch {
+        setServiceResult({ success: false, output: '', error: '请求失败，请检查网络' });
+      } finally {
+        setServiceAction('idle');
+      }
+    };
+
+    const actionBusy = serviceAction !== 'idle';
+    const configContent = activeConfigTab === 'compose' ? serviceConfig?.compose : serviceConfig?.hubConfig;
+    const configLabel = activeConfigTab === 'compose' ? 'docker-compose.yml' : 'jupyterhub_config.py';
+    const configPath = activeConfigTab === 'compose'
+      ? '/opt/jupyterhub/docker-compose.yml'
+      : '/opt/jupyterhub/config/jupyterhub_config.py';
+
+    return (
+      <div className="space-y-6">
+        {/* 操作区 */}
+        <div className="bg-white rounded-xl shadow-sm border border-slate-200">
+          <div className="p-6 border-b border-slate-200">
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-semibold text-slate-900">JupyterHub 服务</h3>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => handleAction('start')}
+                  disabled={actionBusy}
+                  className="flex items-center gap-2 px-4 py-2 text-sm bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors disabled:opacity-60">
+                  <Power className="w-4 h-4" />
+                  {serviceAction === 'starting' ? '启动中...' : '启动服务'}
+                </button>
+                <button
+                  onClick={() => handleAction('restart')}
+                  disabled={actionBusy}
+                  className="flex items-center gap-2 px-4 py-2 text-sm bg-yellow-600 text-white rounded-lg hover:bg-yellow-700 transition-colors disabled:opacity-60">
+                  <RefreshCw className={`w-4 h-4 ${serviceAction === 'restarting' ? 'animate-spin' : ''}`} />
+                  {serviceAction === 'restarting' ? '重启中...' : '重启服务'}
+                </button>
+                <button
+                  onClick={() => handleAction('stop')}
+                  disabled={actionBusy}
+                  className="flex items-center gap-2 px-4 py-2 text-sm bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors disabled:opacity-60">
+                  <PowerOff className="w-4 h-4" />
+                  {serviceAction === 'stopping' ? '停止中...' : '停止服务'}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* 操作结果输出 */}
+          {serviceResult && (
+            <div className={`mx-6 mt-4 p-4 rounded-lg border text-sm ${
+              serviceResult.success
+                ? 'bg-green-50 border-green-200 text-green-900'
+                : 'bg-red-50 border-red-200 text-red-900'
+            }`}>
+              <p className="font-medium mb-1">{serviceResult.success ? '✓ 执行成功' : '✗ 执行失败'}</p>
+              {serviceResult.error && <p className="text-xs mb-1 opacity-80">{serviceResult.error}</p>}
+              {serviceResult.output && (
+                <pre className="text-xs font-mono whitespace-pre-wrap bg-black/5 rounded p-2 mt-2 max-h-40 overflow-y-auto">
+                  {serviceResult.output}
+                </pre>
+              )}
+            </div>
+          )}
+
+          <div className="p-6">
+            <div className="text-sm text-slate-500 space-y-1">
+              <p>启动脚本：<code className="bg-slate-100 px-1 rounded">/opt/jupyterhub/start.sh</code></p>
+              <p>停止脚本：<code className="bg-slate-100 px-1 rounded">/opt/jupyterhub/stop.sh</code></p>
+              <p>重启脚本：<code className="bg-slate-100 px-1 rounded">/opt/jupyterhub/restart.sh</code></p>
             </div>
           </div>
         </div>
-        <div className="p-6">
-          {services.map((service) => (
-            <div key={service.name} className="border border-slate-200 rounded-lg p-6">
-              <div className="grid grid-cols-2 gap-6">
-                <div>
-                  <div className="flex items-center gap-2 mb-4">
-                    <CheckCircle className="w-5 h-5 text-green-600" />
-                    <h4 className="text-lg font-semibold text-slate-900">{service.name}</h4>
-                    <span className={`px-2 py-1 text-xs rounded ${getStatusColor(service.status)}`}>
-                      {service.status}
-                    </span>
-                  </div>
-                  <div className="space-y-2 text-sm">
-                    <div className="flex justify-between">
-                      <span className="text-slate-600">副本数:</span>
-                      <span className="text-slate-900">{service.replicas} / {service.runningReplicas}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-slate-600">镜像:</span>
-                      <span className="text-slate-900">{service.image}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-slate-600">端口:</span>
-                      <span className="text-slate-900">{service.ports.join(', ')}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-slate-600">创建时间:</span>
-                      <span className="text-slate-900">{service.createdAt}</span>
-                    </div>
-                  </div>
-                </div>
-                <div className="bg-slate-50 rounded-lg p-4">
-                  <h5 className="text-sm font-medium text-slate-700 mb-3">服务配置</h5>
-                  <div className="space-y-2 text-xs">
-                    <div className="bg-white p-3 rounded border border-slate-200">
-                      <p className="font-mono text-slate-700">
-                        <span className="text-slate-500"># docker-compose.yml</span><br />
-                        version: '3.8'<br />
-                        services:<br />
-                        &nbsp;&nbsp;jupyterhub:<br />
-                        &nbsp;&nbsp;&nbsp;&nbsp;image: {service.image}<br />
-                        &nbsp;&nbsp;&nbsp;&nbsp;ports:<br />
-                        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;- {service.ports[0]}<br />
-                        &nbsp;&nbsp;&nbsp;&nbsp;deploy:<br />
-                        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;replicas: {service.replicas}
-                      </p>
-                    </div>
-                  </div>
-                </div>
+
+        {/* 配置文件查看 */}
+        <div className="bg-white rounded-xl shadow-sm border border-slate-200">
+          <div className="p-6 border-b border-slate-200">
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-semibold text-slate-900">配置文件</h3>
+              {/* Tab 切换 */}
+              <div className="flex rounded-lg border border-slate-200 overflow-hidden text-sm">
+                <button
+                  onClick={() => setActiveConfigTab('compose')}
+                  className={`px-4 py-2 transition-colors ${activeConfigTab === 'compose' ? 'bg-blue-600 text-white' : 'bg-white text-slate-600 hover:bg-slate-50'}`}>
+                  docker-compose.yml
+                </button>
+                <button
+                  onClick={() => setActiveConfigTab('hubConfig')}
+                  className={`px-4 py-2 transition-colors ${activeConfigTab === 'hubConfig' ? 'bg-blue-600 text-white' : 'bg-white text-slate-600 hover:bg-slate-50'}`}>
+                  jupyterhub_config.py
+                </button>
               </div>
             </div>
-          ))}
+            <p className="text-xs text-slate-400 mt-2">{configPath}</p>
+          </div>
+          <div className="p-6">
+            {serviceConfigLoading ? (
+              <div className="text-sm text-slate-400 text-center py-8">加载配置文件中...</div>
+            ) : configContent ? (
+              <pre className="text-xs font-mono bg-slate-900 text-slate-100 rounded-lg p-4 overflow-auto max-h-[480px] whitespace-pre">
+                {configContent}
+              </pre>
+            ) : (
+              <div className="text-sm text-red-500 text-center py-8">
+                无法读取 {configLabel}，请确认文件路径是否正确
+              </div>
+            )}
+          </div>
         </div>
       </div>
-    </div>
-  );
+    );
+  };
 
   const renderNodes = () => (
     <div className="space-y-6">
@@ -818,7 +893,9 @@ export default function JupyterHubDashboard() {
                   </div>
                   <div className="bg-slate-50 p-3 rounded-lg">
                     <p className="text-xs text-slate-600 mb-1">状态</p>
-                    <p className={`text-sm font-medium ${getStatusColor(node.status)}`}>{node.status}</p>
+                    <p className={`text-sm font-medium ${getNodeStatus(node.status).textClass}`}>
+                      {getNodeStatus(node.status).label}
+                    </p>
                   </div>
                 </div>
 
@@ -1696,6 +1773,13 @@ export default function JupyterHubDashboard() {
 
   return (
     <div className="flex min-h-screen bg-slate-100">
+      {/* 刷新成功 Toast 提示 */}
+      {refreshToast && (
+        <div className="fixed top-4 right-4 z-50 flex items-center gap-2 px-4 py-3 bg-green-600 text-white rounded-lg shadow-lg">
+          <CheckCircle className="w-4 h-4" />
+          <span className="text-sm font-medium">数据刷新成功</span>
+        </div>
+      )}
       {renderSidebar()}
       <div className="flex-1 p-8">
         <div className="mb-8">
