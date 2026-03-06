@@ -17,7 +17,7 @@
  *
  * 返回示例：
  * {
- *   totalUsers: 10,
+ *   totalUsers: 10 ,
  *   runningUsers: 3,
  *   stoppedUsers: 7,
  *   workerMemTotalGB: 22.8,
