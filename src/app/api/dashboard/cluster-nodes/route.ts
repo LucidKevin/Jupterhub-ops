@@ -5,7 +5,7 @@
  * 并结合 src/config/cluster.ts 中的配置补全显示名称、IP、角色、标签等信息。
  *
  * 容器数量统计策略：
- *   - Manager 节点：默认为 1（JupyterHub Hub/Proxy 等基础服务）
+ *   - Manager 节点：本机执行 `docker ps -q | wc -l`，返回 0 表示 JupyterHub 已停机
  *   - Worker 节点：通过 `ssh -p 39000 root@<ip> 'docker ps -q | wc -l'` 获取实际运行容器数
  *
  * 返回示例：
@@ -47,6 +47,20 @@ interface DockerNode {
   Status: string;        // Ready | Down
   Availability: string;  // Active | Pause | Drain
   ManagerStatus: string; // Leader | Reachable | ""（worker 为空）
+}
+
+/**
+ * 获取本机（Manager 节点）正在运行的 Docker 容器数量。
+ * 直接在本地执行 docker ps，无需 SSH。
+ * 返回 0 表示 JupyterHub 已停机。
+ */
+async function getManagerContainerCount(): Promise<number> {
+  try {
+    const { stdout } = await execAsync("docker ps -q | wc -l");
+    return parseInt(stdout.trim(), 10) || 0;
+  } catch {
+    return 0;
+  }
 }
 
 /**
@@ -108,7 +122,7 @@ export async function GET() {
       enriched.map(async (node) => {
         const containers =
           node.role === 'manager'
-            ? 1
+            ? await getManagerContainerCount()   // 本机直接执行，0 表示 JupyterHub 已停机
             : await getWorkerContainerCount(node.ip);
         return { ...node, containers };
       })

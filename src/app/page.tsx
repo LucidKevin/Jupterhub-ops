@@ -1,13 +1,13 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { 
-  LayoutDashboard, 
-  Server, 
-  HardDrive, 
-  Activity, 
-  Settings, 
-  Terminal, 
+import {
+  LayoutDashboard,
+  Server,
+  HardDrive,
+  Activity,
+  Settings,
+  Terminal,
   AlertTriangle,
   Users,
   Package,
@@ -41,13 +41,47 @@ interface NodeData {
   labels: string[];
 }
 
+interface UserEntry {
+  username: string;
+  admin: boolean;
+  status: 'running' | 'stopped';
+  containerName: string | null;
+  node: string | null;
+  cpuPercent: number;
+  memUsageMiB: number;
+  memLimitMiB: number;
+  lastActivity: string | null;
+}
+
+interface UserStatsData {
+  totalUsers: number;
+  runningUsers: number;
+  stoppedUsers: number;
+  workerMemTotalGB: number;
+  workerMemUsedGB: number;
+  users: UserEntry[];
+}
+
+interface CleanupPreviewUser {
+  username: string;
+  lastActivity: string | null;
+  daysIdle: number;
+  admin: boolean;
+}
+
+interface CleanupResult {
+  username: string;
+  success: boolean;
+  message: string;
+}
+
 // 节点显示配置（与 src/config/cluster.ts 保持同步）
 // 作为初始占位数据，确保页面加载时节点列表不为空
 const DASHBOARD_NODE_CONFIG: NodeData[] = [
-  { id: 'node-235', name: '主节点 (10.9.123.235)',   role: 'Manager', status: '加载中', cpu: 0, memory: 0, disk: 0, ip: '10.9.123.235', containers: 0, labels: ['manager', 'nfs-server'] },
-  { id: 'node-228', name: '计算节点1 (10.9.123.228)', role: 'Worker',  status: '加载中', cpu: 0, memory: 0, disk: 0, ip: '10.9.123.228', containers: 0, labels: ['worker'] },
-  { id: 'node-229', name: '计算节点2 (10.9.123.229)', role: 'Worker',  status: '加载中', cpu: 0, memory: 0, disk: 0, ip: '10.9.123.229', containers: 0, labels: ['worker'] },
-  { id: 'node-230', name: '计算节点3 (10.9.123.230)', role: 'Worker',  status: '加载中', cpu: 0, memory: 0, disk: 0, ip: '10.9.123.230', containers: 0, labels: ['worker'] },
+  { id: 'node-235', name: '主节点 (10.9.123.235)', role: 'Manager', status: '加载中', cpu: 0, memory: 0, disk: 0, ip: '10.9.123.235', containers: 0, labels: ['manager', 'nfs-server'] },
+  { id: 'node-228', name: '计算节点1 (10.9.123.228)', role: 'Worker', status: '加载中', cpu: 0, memory: 0, disk: 0, ip: '10.9.123.228', containers: 0, labels: ['worker'] },
+  { id: 'node-229', name: '计算节点2 (10.9.123.229)', role: 'Worker', status: '加载中', cpu: 0, memory: 0, disk: 0, ip: '10.9.123.229', containers: 0, labels: ['worker'] },
+  { id: 'node-230', name: '计算节点3 (10.9.123.230)', role: 'Worker', status: '加载中', cpu: 0, memory: 0, disk: 0, ip: '10.9.123.230', containers: 0, labels: ['worker'] },
 ];
 
 export default function JupyterHubDashboard() {
@@ -131,18 +165,18 @@ export default function JupyterHubDashboard() {
        */
       const merged: NodeData[] = DASHBOARD_NODE_CONFIG.map((base) => {
         const cn = clusterNodes.find((n: { ip: string }) => n.ip === base.ip);
-        const m  = metricsNodes.find((n: { ip: string }) => n.ip === base.ip);
+        const m = metricsNodes.find((n: { ip: string }) => n.ip === base.ip);
         return {
-          id:         cn?.id          ?? base.id,
-          name:       base.name,
-          role:       base.role,
-          status:     cn?.status      ?? '未知',
-          cpu:        m?.cpuUsage     ?? 0,
-          memory:     m?.memoryUsage  ?? 0,
-          disk:       m?.diskUsage    ?? 0,
-          ip:         base.ip,
-          containers: cn?.containers  ?? base.containers,
-          labels:     base.labels,
+          id: cn?.id ?? base.id,
+          name: base.name,
+          role: base.role,
+          status: cn?.status ?? '未知',
+          cpu: m?.cpuUsage ?? 0,
+          memory: m?.memoryUsage ?? 0,
+          disk: m?.diskUsage ?? 0,
+          ip: base.ip,
+          containers: cn?.containers ?? base.containers,
+          labels: base.labels,
         };
       });
       setNodes(merged);
@@ -183,111 +217,29 @@ export default function JupyterHubDashboard() {
   const [serviceResult, setServiceResult] = useState<{ success: boolean; output: string; error?: string } | null>(null);
   const [activeConfigTab, setActiveConfigTab] = useState<'compose' | 'hubConfig'>('compose');
 
-  // 模拟数据 - 用户管理
-  const [users, setUsers] = useState([
-    {
-      id: 1,
-      username: 'admin',
-      email: 'admin@company.com',
-      serverName: 'jupyter-admin',
-      status: 'Running',
-      node: 'node-228',
-      memory: 1.2,
-      memoryLimit: 2.0,
-      cpu: 15,
-      uptime: '2h 30m',
-      lastLogin: '2024-01-15 14:30:00',
-      notebookPort: 8888,
-      image: 'my-scipy-notebook:latest',
-      notebookCount: 3,
-      isAdmin: true,
-    },
-    {
-      id: 2,
-      username: 'user1',
-      email: 'user1@company.com',
-      serverName: 'jupyter-user1',
-      status: 'Running',
-      node: 'node-229',
-      memory: 1.5,
-      memoryLimit: 2.0,
-      cpu: 25,
-      uptime: '1h 45m',
-      lastLogin: '2024-01-15 13:45:00',
-      notebookPort: 8888,
-      image: 'my-scipy-notebook:latest',
-      notebookCount: 5,
-      isAdmin: false,
-    },
-    {
-      id: 3,
-      username: 'user2',
-      email: 'user2@company.com',
-      serverName: 'jupyter-user2',
-      status: 'Running',
-      node: 'node-230',
-      memory: 1.8,
-      memoryLimit: 2.0,
-      cpu: 32,
-      uptime: '3h 10m',
-      lastLogin: '2024-01-15 11:20:00',
-      notebookPort: 8888,
-      image: 'my-scipy-notebook:latest',
-      notebookCount: 7,
-      isAdmin: false,
-    },
-    {
-      id: 4,
-      username: 'user3',
-      email: 'user3@company.com',
-      serverName: 'jupyter-user3',
-      status: 'Running',
-      node: 'node-228',
-      memory: 1.1,
-      memoryLimit: 2.0,
-      cpu: 18,
-      uptime: '0h 45m',
-      lastLogin: '2024-01-15 15:30:00',
-      notebookPort: 8888,
-      image: 'my-scipy-notebook:latest',
-      notebookCount: 2,
-      isAdmin: false,
-    },
-    {
-      id: 5,
-      username: 'user4',
-      email: 'user4@company.com',
-      serverName: 'jupyter-user4',
-      status: 'Stopped',
-      node: '-',
-      memory: 0,
-      memoryLimit: 2.0,
-      cpu: 0,
-      uptime: '-',
-      lastLogin: '2024-01-14 18:00:00',
-      notebookPort: 8888,
-      image: 'my-scipy-notebook:latest',
-      notebookCount: 0,
-      isAdmin: false,
-    },
-    {
-      id: 6,
-      username: 'user5',
-      email: 'user5@company.com',
-      serverName: 'jupyter-user5',
-      status: 'Stopped',
-      node: '-',
-      memory: 0,
-      memoryLimit: 2.0,
-      cpu: 0,
-      uptime: '-',
-      lastLogin: '2024-01-14 16:30:00',
-      notebookPort: 8888,
-      image: 'my-scipy-notebook:latest',
-      notebookCount: 0,
-      isAdmin: false,
-    },
-  ]);
+  // 用户管理实时数据
+  const [userStatsData, setUserStatsData] = useState<UserStatsData | null>(null);
+  const [userStatsLoading, setUserStatsLoading] = useState(false);
+
+  // 切换到用户管理 tab 时懒加载用户数据（避免在 render 阶段 setState）
+  useEffect(() => {
+    if (activeTab !== 'users' || userStatsData || userStatsLoading) return;
+    setUserStatsLoading(true);
+    fetch('/api/dashboard/user-stats')
+      .then((r) => r.json())
+      .then((data: UserStatsData) => setUserStatsData(data))
+      .catch(() => setUserStatsData({ totalUsers: 0, runningUsers: 0, stoppedUsers: 0, workerMemTotalGB: 0, workerMemUsedGB: 0, users: [] }))
+      .finally(() => setUserStatsLoading(false));
+  }, [activeTab, userStatsData, userStatsLoading]);
+
+  // 闲置用户清理
+  const [cleanupThreshold, setCleanupThreshold] = useState<3 | 7 | 15 | 30>(7);
+  const [cleanupLoading, setCleanupLoading] = useState(false);
+  const [cleanupPreview, setCleanupPreview] = useState<{ total: number; affected: CleanupPreviewUser[] } | null>(null);
+  const [cleanupResults, setCleanupResults] = useState<CleanupResult[] | null>(null);
+  const [cleanupConfirming, setCleanupConfirming] = useState(false);
+  // 正在执行启动/停止操作的用户名（null 表示无）
+  const [userActionLoading, setUserActionLoading] = useState<string | null>(null);
 
   // 根据实际节点内存数据动态生成 OOM 告警（内存使用率 >= 85% 时触发）
   const oomAlerts = nodes
@@ -325,21 +277,6 @@ export default function JupyterHubDashboard() {
     }));
   };
 
-  const getStatusColor = (status: string) => {
-    switch (status.toLowerCase()) {
-      case 'running':
-      case 'ready':
-        return 'text-green-500';
-      case 'stopped':
-      case 'offline':
-        return 'text-red-500';
-      case 'warning':
-        return 'text-yellow-500';
-      default:
-        return 'text-gray-500';
-    }
-  };
-
   /** Docker node status → 中文显示 + 圆点颜色 */
   const getNodeStatus = (status: string): { label: string; dotClass: string; textClass: string } => {
     switch (status) {
@@ -361,40 +298,6 @@ export default function JupyterHubDashboard() {
     return 'bg-green-500';
   };
 
-  // 启动用户 server
-  const startUserServer = (userId: number) => {
-    setUsers(prevUsers =>
-      prevUsers.map(user =>
-        user.id === userId
-          ? {
-              ...user,
-              status: 'Running',
-              memory: 0.5,
-              cpu: 5,
-              uptime: '刚刚启动',
-            }
-          : user
-      )
-    );
-  };
-
-  // 停止用户 server
-  const stopUserServer = (userId: number) => {
-    setUsers(prevUsers =>
-      prevUsers.map(user =>
-        user.id === userId
-          ? {
-              ...user,
-              status: 'Stopped',
-              memory: 0,
-              cpu: 0,
-              uptime: '-',
-              node: '-',
-            }
-          : user
-      )
-    );
-  };
 
   const renderSidebar = () => (
     <div className="w-64 bg-slate-900 text-white p-4 min-h-screen">
@@ -409,9 +312,8 @@ export default function JupyterHubDashboard() {
       <nav className="space-y-2">
         <button
           onClick={() => setActiveTab('dashboard')}
-          className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${
-            activeTab === 'dashboard' ? 'bg-blue-600' : 'hover:bg-slate-800'
-          }`}
+          className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${activeTab === 'dashboard' ? 'bg-blue-600' : 'hover:bg-slate-800'
+            }`}
         >
           <LayoutDashboard className="w-5 h-5" />
           <span>仪表盘</span>
@@ -419,9 +321,8 @@ export default function JupyterHubDashboard() {
 
         <button
           onClick={() => setActiveTab('services')}
-          className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${
-            activeTab === 'services' ? 'bg-blue-600' : 'hover:bg-slate-800'
-          }`}
+          className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${activeTab === 'services' ? 'bg-blue-600' : 'hover:bg-slate-800'
+            }`}
         >
           <Server className="w-5 h-5" />
           <span>服务管理</span>
@@ -429,9 +330,8 @@ export default function JupyterHubDashboard() {
 
         <button
           onClick={() => setActiveTab('nodes')}
-          className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${
-            activeTab === 'nodes' ? 'bg-blue-600' : 'hover:bg-slate-800'
-          }`}
+          className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${activeTab === 'nodes' ? 'bg-blue-600' : 'hover:bg-slate-800'
+            }`}
         >
           <Cpu className="w-5 h-5" />
           <span>节点管理</span>
@@ -439,9 +339,8 @@ export default function JupyterHubDashboard() {
 
         <button
           onClick={() => setActiveTab('users')}
-          className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${
-            activeTab === 'users' ? 'bg-blue-600' : 'hover:bg-slate-800'
-          }`}
+          className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${activeTab === 'users' ? 'bg-blue-600' : 'hover:bg-slate-800'
+            }`}
         >
           <Users className="w-5 h-5" />
           <span>用户管理</span>
@@ -449,9 +348,8 @@ export default function JupyterHubDashboard() {
 
         <button
           onClick={() => setActiveTab('nfs')}
-          className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${
-            activeTab === 'nfs' ? 'bg-blue-600' : 'hover:bg-slate-800'
-          }`}
+          className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${activeTab === 'nfs' ? 'bg-blue-600' : 'hover:bg-slate-800'
+            }`}
         >
           <HardDrive className="w-5 h-5" />
           <span>NFS 存储</span>
@@ -459,9 +357,8 @@ export default function JupyterHubDashboard() {
 
         <button
           onClick={() => setActiveTab('resources')}
-          className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${
-            activeTab === 'resources' ? 'bg-blue-600' : 'hover:bg-slate-800'
-          }`}
+          className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${activeTab === 'resources' ? 'bg-blue-600' : 'hover:bg-slate-800'
+            }`}
         >
           <MemoryStick className="w-5 h-5" />
           <span>资源监控 & OOM</span>
@@ -469,9 +366,8 @@ export default function JupyterHubDashboard() {
 
         <button
           onClick={() => setActiveTab('logs')}
-          className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${
-            activeTab === 'logs' ? 'bg-blue-600' : 'hover:bg-slate-800'
-          }`}
+          className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${activeTab === 'logs' ? 'bg-blue-600' : 'hover:bg-slate-800'
+            }`}
         >
           <FileText className="w-5 h-5" />
           <span>日志查看</span>
@@ -479,9 +375,8 @@ export default function JupyterHubDashboard() {
 
         <button
           onClick={() => setActiveTab('operations')}
-          className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${
-            activeTab === 'operations' ? 'bg-blue-600' : 'hover:bg-slate-800'
-          }`}
+          className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${activeTab === 'operations' ? 'bg-blue-600' : 'hover:bg-slate-800'
+            }`}
         >
           <Terminal className="w-5 h-5" />
           <span>运维操作</span>
@@ -714,7 +609,7 @@ export default function JupyterHubDashboard() {
     // 首次切换到服务管理 tab 时加载配置文件
     if (!serviceConfig && !serviceConfigLoading) {
       setServiceConfigLoading(true);
-      fetch('/api/dashboard/service/config')
+      fetch('/api/servicemanage/config')
         .then((r) => r.json())
         .then((data) => setServiceConfig(data))
         .catch(() => setServiceConfig({ compose: null, hubConfig: null }))
@@ -725,7 +620,7 @@ export default function JupyterHubDashboard() {
       setServiceAction(action === 'start' ? 'starting' : action === 'stop' ? 'stopping' : 'restarting');
       setServiceResult(null);
       try {
-        const res = await fetch('/api/dashboard/service/action', {
+        const res = await fetch('/api/servicemanage/action', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ action }),
@@ -781,11 +676,10 @@ export default function JupyterHubDashboard() {
 
           {/* 操作结果输出 */}
           {serviceResult && (
-            <div className={`mx-6 mt-4 p-4 rounded-lg border text-sm ${
-              serviceResult.success
+            <div className={`mx-6 mt-4 p-4 rounded-lg border text-sm ${serviceResult.success
                 ? 'bg-green-50 border-green-200 text-green-900'
                 : 'bg-red-50 border-red-200 text-red-900'
-            }`}>
+              }`}>
               <p className="font-medium mb-1">{serviceResult.success ? '✓ 执行成功' : '✗ 执行失败'}</p>
               {serviceResult.error && <p className="text-xs mb-1 opacity-80">{serviceResult.error}</p>}
               {serviceResult.output && (
@@ -1286,259 +1180,466 @@ export default function JupyterHubDashboard() {
     </div>
   );
 
-  const renderUsers = () => (
-    <div className="space-y-6">
-      {/* 用户统计卡片 */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-        <div className="bg-white rounded-xl shadow-sm p-6 border border-slate-200">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm font-medium text-slate-600">总用户数</p>
-              <p className="text-3xl font-bold text-slate-900 mt-2">{users.length}</p>
-            </div>
-            <div className="w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center">
-              <Users className="w-6 h-6 text-blue-600" />
-            </div>
-          </div>
-        </div>
+  const renderUsers = () => {
+    const doFetchUserStats = () => {
+      setUserStatsLoading(true);
+      fetch('/api/dashboard/user-stats')
+        .then((r) => r.json())
+        .then((data: UserStatsData) => setUserStatsData(data))
+        .catch(() => { })
+        .finally(() => setUserStatsLoading(false));
+    };
 
-        <div className="bg-white rounded-xl shadow-sm p-6 border border-slate-200">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm font-medium text-slate-600">运行中用户</p>
-              <p className="text-3xl font-bold text-green-600 mt-2">
-                {users.filter(u => u.status === 'Running').length}
-              </p>
-            </div>
-            <div className="w-12 h-12 bg-green-100 rounded-full flex items-center justify-center">
-              <CheckCircle className="w-6 h-6 text-green-600" />
-            </div>
-          </div>
-        </div>
+    const handleCleanupPreview = async () => {
+      setCleanupLoading(true);
+      setCleanupPreview(null);
+      setCleanupResults(null);
+      setCleanupConfirming(false);
+      try {
+        const res = await fetch('/api/users/cleanup', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ thresholdDays: cleanupThreshold, dryRun: true }),
+        });
+        const data = await res.json();
+        setCleanupPreview({ total: data.total, affected: data.affected ?? [] });
+      } catch {
+        setCleanupPreview({ total: 0, affected: [] });
+      } finally {
+        setCleanupLoading(false);
+      }
+    };
 
-        <div className="bg-white rounded-xl shadow-sm p-6 border border-slate-200">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm font-medium text-slate-600">已停止用户</p>
-              <p className="text-3xl font-bold text-red-600 mt-2">
-                {users.filter(u => u.status === 'Stopped').length}
-              </p>
-            </div>
-            <div className="w-12 h-12 bg-red-100 rounded-full flex items-center justify-center">
-              <XCircle className="w-6 h-6 text-red-600" />
-            </div>
-          </div>
-        </div>
+    const handleCleanupExecute = async () => {
+      setCleanupLoading(true);
+      setCleanupConfirming(false);
+      try {
+        const res = await fetch('/api/users/cleanup', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ thresholdDays: cleanupThreshold, dryRun: false }),
+        });
+        const data = await res.json();
+        setCleanupResults(data.results ?? []);
+        doFetchUserStats();
+      } catch {
+        setCleanupResults([]);
+      } finally {
+        setCleanupLoading(false);
+      }
+    };
 
-        <div className="bg-white rounded-xl shadow-sm p-6 border border-slate-200">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm font-medium text-slate-600">总内存使用</p>
-              <p className="text-3xl font-bold text-slate-900 mt-2">
-                {users.reduce((acc, u) => acc + u.memory, 0).toFixed(1)} GB
-              </p>
-              <p className="text-xs text-slate-500 mt-1">
-                限制: {users.length * 2} GB
-              </p>
-            </div>
-            <div className="w-12 h-12 bg-purple-100 rounded-full flex items-center justify-center">
-              <MemoryStick className="w-6 h-6 text-purple-600" />
-            </div>
-          </div>
-        </div>
-      </div>
+    const users = (userStatsData?.users ?? []).slice().sort((a, b) => b.memUsageMiB - a.memUsageMiB);
+    const usedMemGB = userStatsData?.workerMemUsedGB ?? 0;
+    const totalMemGB = userStatsData?.workerMemTotalGB ?? 0;
 
-      {/* 用户列表 */}
-      <div className="bg-white rounded-xl shadow-sm border border-slate-200">
-        <div className="p-6 border-b border-slate-200">
-          <div className="flex items-center justify-between">
-            <h3 className="text-lg font-semibold text-slate-900">用户列表</h3>
-            <div className="flex gap-2">
-              <select className="px-3 py-2 text-sm border border-slate-300 rounded-lg">
-                <option value="all">所有用户</option>
-                <option value="running">运行中</option>
-                <option value="stopped">已停止</option>
-              </select>
-              <button className="flex items-center gap-2 px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors">
-                <RefreshCw className="w-4 h-4" />
-                刷新
-              </button>
+    return (
+      <div className="space-y-6">
+        {/* 用户统计卡片 */}
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+          <div className="bg-white rounded-xl shadow-sm p-6 border border-slate-200">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium text-slate-600">总用户数</p>
+                <p className="text-3xl font-bold text-slate-900 mt-2">
+                  {userStatsLoading && !userStatsData ? '…' : (userStatsData?.totalUsers ?? '—')}
+                </p>
+              </div>
+              <div className="w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center">
+                <Users className="w-6 h-6 text-blue-600" />
+              </div>
             </div>
           </div>
-        </div>
-        <div className="p-6">
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead>
-                <tr className="border-b border-slate-200">
-                  <th className="text-left py-3 px-4 text-sm font-medium text-slate-600">用户名</th>
-                  <th className="text-left py-3 px-4 text-sm font-medium text-slate-600">Server 名称</th>
-                  <th className="text-left py-3 px-4 text-sm font-medium text-slate-600">状态</th>
-                  <th className="text-left py-3 px-4 text-sm font-medium text-slate-600">节点</th>
-                  <th className="text-left py-3 px-4 text-sm font-medium text-slate-600">内存占用</th>
-                  <th className="text-left py-3 px-4 text-sm font-medium text-slate-600">CPU</th>
-                  <th className="text-left py-3 px-4 text-sm font-medium text-slate-600">运行时间</th>
-                  <th className="text-left py-3 px-4 text-sm font-medium text-slate-600">最后登录</th>
-                  <th className="text-left py-3 px-4 text-sm font-medium text-slate-600">操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                {users.map((user) => (
-                  <tr key={user.id} className="border-b border-slate-100 hover:bg-slate-50">
-                    <td className="py-4 px-4">
-                      <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 bg-slate-200 rounded-full flex items-center justify-center">
-                          <span className="text-sm font-semibold text-slate-700">
-                            {user.username.charAt(0).toUpperCase()}
-                          </span>
-                        </div>
-                        <div>
-                          <p className="text-sm font-medium text-slate-900">{user.username}</p>
-                          <p className="text-xs text-slate-600">{user.email}</p>
-                          {user.isAdmin && (
-                            <span className="inline-block mt-1 px-2 py-0.5 bg-blue-100 text-blue-700 text-xs rounded">
-                              管理员
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                    </td>
-                    <td className="py-4 px-4 text-sm text-slate-900">{user.serverName}</td>
-                    <td className="py-4 px-4">
-                      <span className={`px-3 py-1 text-xs rounded-full font-medium ${
-                        user.status === 'Running' 
-                          ? 'bg-green-100 text-green-700' 
-                          : 'bg-red-100 text-red-700'
-                      }`}>
-                        {user.status === 'Running' ? '运行中' : '已停止'}
-                      </span>
-                    </td>
-                    <td className="py-4 px-4 text-sm text-slate-600">{user.node}</td>
-                    <td className="py-4 px-4">
-                      <div className="flex items-center gap-2">
-                        <div className="flex-1 w-24 bg-slate-200 rounded-full h-2">
-                          <div
-                            className={`h-2 rounded-full ${getHealthColor((user.memory / user.memoryLimit) * 100)}`}
-                            style={{ width: `${(user.memory / user.memoryLimit) * 100}%` }}
-                          />
-                        </div>
-                        <span className="text-sm font-medium text-slate-900">
-                          {user.memory.toFixed(1)} / {user.memoryLimit} GB
-                        </span>
-                      </div>
-                    </td>
-                    <td className="py-4 px-4 text-sm text-slate-900">{user.cpu}%</td>
-                    <td className="py-4 px-4 text-sm text-slate-600">{user.uptime}</td>
-                    <td className="py-4 px-4 text-sm text-slate-600">{user.lastLogin}</td>
-                    <td className="py-4 px-4">
-                      <div className="flex gap-2">
-                        {user.status === 'Running' ? (
-                          <button
-                            onClick={() => stopUserServer(user.id)}
-                            className="flex items-center gap-1 px-3 py-1.5 text-xs bg-red-100 text-red-700 rounded-lg hover:bg-red-200 transition-colors"
-                          >
-                            <PowerOff className="w-3 h-3" />
-                            停止
-                          </button>
-                        ) : (
-                          <button
-                            onClick={() => startUserServer(user.id)}
-                            className="flex items-center gap-1 px-3 py-1.5 text-xs bg-green-100 text-green-700 rounded-lg hover:bg-green-200 transition-colors"
-                          >
-                            <Power className="w-3 h-3" />
-                            启动
-                          </button>
-                        )}
-                        <button className="flex items-center gap-1 px-3 py-1.5 text-xs bg-blue-100 text-blue-700 rounded-lg hover:bg-blue-200 transition-colors">
-                          详情
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </div>
 
-      {/* 内存使用率警告 */}
-      {users.some(u => u.memory / u.memoryLimit >= 0.9) && (
-        <div className="bg-red-50 border border-red-200 rounded-xl p-6">
-          <div className="flex items-start gap-3">
-            <AlertTriangle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
-            <div>
-              <h4 className="text-base font-semibold text-red-900 mb-2">内存使用率警告</h4>
-              <p className="text-sm text-red-700">
-                以下用户内存使用率已超过 90%，可能触发 OOM：
-              </p>
-              <ul className="mt-2 space-y-1 text-sm text-red-700">
-                {users
-                  .filter(u => u.memory / u.memoryLimit >= 0.9)
-                  .map(user => (
-                    <li key={user.id} className="flex items-center gap-2">
-                      <span className="font-medium">{user.username}</span>
-                      <span>
-                        ({((user.memory / user.memoryLimit) * 100).toFixed(0)}% - {user.memory.toFixed(1)} GB)
-                      </span>
-                    </li>
-                  ))}
-              </ul>
-              <div className="mt-4 flex gap-2">
-                <button className="px-4 py-2 text-sm bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors">
-                  查看详情
-                </button>
-                <button className="px-4 py-2 text-sm bg-red-100 text-red-700 rounded-lg hover:bg-red-200 transition-colors">
-                  发送通知
-                </button>
+          <div className="bg-white rounded-xl shadow-sm p-6 border border-slate-200">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium text-slate-600">运行中用户</p>
+                <p className="text-3xl font-bold text-green-600 mt-2">
+                  {userStatsLoading && !userStatsData ? '…' : (userStatsData?.runningUsers ?? '—')}
+                </p>
+              </div>
+              <div className="w-12 h-12 bg-green-100 rounded-full flex items-center justify-center">
+                <CheckCircle className="w-6 h-6 text-green-600" />
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-xl shadow-sm p-6 border border-slate-200">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium text-slate-600">已停止用户</p>
+                <p className="text-3xl font-bold text-red-600 mt-2">
+                  {userStatsLoading && !userStatsData ? '…' : (userStatsData?.stoppedUsers ?? '—')}
+                </p>
+              </div>
+              <div className="w-12 h-12 bg-red-100 rounded-full flex items-center justify-center">
+                <XCircle className="w-6 h-6 text-red-600" />
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-xl shadow-sm p-6 border border-slate-200">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium text-slate-600">Worker 内存使用</p>
+                <p className="text-3xl font-bold text-slate-900 mt-2">
+                  {userStatsLoading && !userStatsData ? '…' : `${usedMemGB.toFixed(1)} GB`}
+                </p>
+                <p className="text-xs text-slate-500 mt-1">共 {totalMemGB.toFixed(1)} GB</p>
+              </div>
+              <div className="w-12 h-12 bg-purple-100 rounded-full flex items-center justify-center">
+                <MemoryStick className="w-6 h-6 text-purple-600" />
               </div>
             </div>
           </div>
         </div>
-      )}
 
-      {/* 用户操作说明 */}
-      <div className="bg-white rounded-xl shadow-sm border border-slate-200">
-        <div className="p-6 border-b border-slate-200">
-          <h3 className="text-lg font-semibold text-slate-900">用户操作说明</h3>
-        </div>
-        <div className="p-6">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div className="p-4 bg-blue-50 border border-blue-200 rounded-lg">
-              <h5 className="text-sm font-medium text-blue-900 mb-2 flex items-center gap-2">
-                <Power className="w-4 h-4" />
-                启动用户 Server
-              </h5>
-              <p className="text-xs text-blue-700">
-                启动用户的 Jupyter Notebook 容器，系统会自动分配一个计算节点。启动后用户可以访问其 Notebook 环境。
-              </p>
-            </div>
-            <div className="p-4 bg-red-50 border border-red-200 rounded-lg">
-              <h5 className="text-sm font-medium text-red-900 mb-2 flex items-center gap-2">
-                <PowerOff className="w-4 h-4" />
-                停止用户 Server
-              </h5>
-              <p className="text-xs text-red-700">
-                停止用户的 Jupyter Notebook 容器，释放资源。用户数据会保留在 NFS 存储中，下次启动时可以恢复。
-              </p>
+        {/* 用户列表 */}
+        <div className="bg-white rounded-xl shadow-sm border border-slate-200">
+          <div className="p-6 border-b border-slate-200">
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-semibold text-slate-900">用户列表</h3>
+              <button
+                onClick={doFetchUserStats}
+                disabled={userStatsLoading}
+                className="flex items-center gap-2 px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-60"
+              >
+                <RefreshCw className={`w-4 h-4 ${userStatsLoading ? 'animate-spin' : ''}`} />
+                {userStatsLoading ? '刷新中...' : '刷新'}
+              </button>
             </div>
           </div>
-          <div className="mt-4 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
-            <h5 className="text-sm font-medium text-yellow-900 mb-2 flex items-center gap-2">
-              <AlertTriangle className="w-4 h-4" />
-              注意事项
-            </h5>
-            <ul className="text-xs text-yellow-700 space-y-1 list-disc list-inside">
-              <li>单个用户容器内存限制为 2G，超过限制会被 OOM Killer 终止</li>
-              <li>用户空闲 30 分钟后，系统会自动关闭其容器以释放资源</li>
-              <li>停止用户 server 不会删除用户数据，数据存储在 NFS 共享存储中</li>
-              <li>建议定期监控高内存使用用户，必要时联系用户优化代码</li>
-            </ul>
+          <div className="p-6">
+            {userStatsLoading && !userStatsData ? (
+              <div className="text-sm text-slate-400 text-center py-8">加载用户数据中...</div>
+            ) : users.length === 0 ? (
+              <div className="text-sm text-slate-400 text-center py-8">暂无用户数据</div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full">
+                  <thead>
+                    <tr className="border-b border-slate-200">
+                      <th className="text-left py-3 px-4 text-sm font-medium text-slate-600">用户名</th>
+                      <th className="text-left py-3 px-4 text-sm font-medium text-slate-600">容器名称</th>
+                      <th className="text-left py-3 px-4 text-sm font-medium text-slate-600">状态</th>
+                      <th className="text-left py-3 px-4 text-sm font-medium text-slate-600">节点</th>
+                      <th className="text-left py-3 px-4 text-sm font-medium text-slate-600">内存占用</th>
+                      <th className="text-left py-3 px-4 text-sm font-medium text-slate-600">CPU</th>
+                      <th className="text-left py-3 px-4 text-sm font-medium text-slate-600">最后活跃</th>
+                      <th className="text-left py-3 px-4 text-sm font-medium text-slate-600">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {users.map((user) => (
+                      <tr key={user.username} className="border-b border-slate-100 hover:bg-slate-50">
+                        <td className="py-4 px-4">
+                          <div className="flex items-center gap-3">
+                            <div className="w-8 h-8 bg-slate-200 rounded-full flex items-center justify-center">
+                              <span className="text-sm font-semibold text-slate-700">
+                                {user.username.charAt(0).toUpperCase()}
+                              </span>
+                            </div>
+                            <div>
+                              <p className="text-sm font-medium text-slate-900">{user.username}</p>
+                              {user.admin && (
+                                <span className="inline-block mt-0.5 px-2 py-0.5 bg-blue-100 text-blue-700 text-xs rounded">
+                                  管理员
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        </td>
+                        <td className="py-4 px-4 text-xs text-slate-500 font-mono">
+                          {user.containerName ?? '—'}
+                        </td>
+                        <td className="py-4 px-4">
+                          <span className={`px-3 py-1 text-xs rounded-full font-medium ${user.status === 'running'
+                              ? 'bg-green-100 text-green-700'
+                              : 'bg-red-100 text-red-700'
+                            }`}>
+                            {user.status === 'running' ? '运行中' : '已停止'}
+                          </span>
+                        </td>
+                        <td className="py-4 px-4 text-sm text-slate-600">{user.node ?? '—'}</td>
+                        <td className="py-4 px-4">
+                          {user.status === 'running' && user.memLimitMiB > 0 ? (
+                            <div className="space-y-1">
+                              <div className="flex items-center gap-2">
+                                <div className="flex-1 bg-slate-200 rounded-full h-2 min-w-[80px]">
+                                  <div
+                                    className={`h-2 rounded-full ${getHealthColor((user.memUsageMiB / user.memLimitMiB) * 100)}`}
+                                    style={{ width: `${Math.min((user.memUsageMiB / user.memLimitMiB) * 100, 100)}%` }}
+                                  />
+                                </div>
+                                <span className="text-xs text-slate-500 whitespace-nowrap">
+                                  {((user.memUsageMiB / user.memLimitMiB) * 100).toFixed(1)}%
+                                </span>
+                              </div>
+                              <div className="text-xs text-slate-600 whitespace-nowrap">
+                                {user.memLimitMiB >= 1024
+                                  ? `${(user.memUsageMiB / 1024).toFixed(2)} / ${(user.memLimitMiB / 1024).toFixed(1)} GiB`
+                                  : `${Math.round(user.memUsageMiB)} / ${Math.round(user.memLimitMiB)} MiB`}
+                              </div>
+                            </div>
+                          ) : (
+                            <span className="text-sm text-slate-400">—</span>
+                          )}
+                        </td>
+                        <td className="py-4 px-4 text-sm text-slate-900">
+                          {user.status === 'running' ? `${user.cpuPercent.toFixed(1)}%` : '—'}
+                        </td>
+                        <td className="py-4 px-4 text-sm text-slate-600">
+                          {user.lastActivity
+                            ? new Date(user.lastActivity).toLocaleString('zh-CN', { hour12: false })
+                            : '—'}
+                        </td>
+                        <td className="py-4 px-4">
+                          {user.status === 'running' ? (
+                            <button
+                              onClick={async () => {
+                                setUserActionLoading(user.username);
+                                await fetch('/api/users/server', {
+                                  method: 'POST',
+                                  headers: { 'Content-Type': 'application/json' },
+                                  body: JSON.stringify({ action: 'stop', username: user.username }),
+                                });
+                                setUserActionLoading(null);
+                                doFetchUserStats();
+                              }}
+                              disabled={userActionLoading === user.username}
+                              className="flex items-center gap-1 px-3 py-1.5 text-xs bg-red-100 text-red-700 rounded-lg hover:bg-red-200 transition-colors disabled:opacity-60"
+                            >
+                              <PowerOff className="w-3 h-3" />
+                              {userActionLoading === user.username ? '停止中…' : '停止'}
+                            </button>
+                          ) : (
+                            <button
+                              onClick={async () => {
+                                setUserActionLoading(user.username);
+                                await fetch('/api/users/server', {
+                                  method: 'POST',
+                                  headers: { 'Content-Type': 'application/json' },
+                                  body: JSON.stringify({ action: 'start', username: user.username }),
+                                });
+                                setUserActionLoading(null);
+                                doFetchUserStats();
+                              }}
+                              disabled={userActionLoading === user.username}
+                              className="flex items-center gap-1 px-3 py-1.5 text-xs bg-green-100 text-green-700 rounded-lg hover:bg-green-200 transition-colors disabled:opacity-60"
+                            >
+                              <Power className="w-3 h-3" />
+                              {userActionLoading === user.username ? '启动中…' : '启动'}
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* 内存使用率警告 */}
+        {users.some((u) => u.memLimitMiB > 0 && u.memUsageMiB / u.memLimitMiB >= 0.9) && (
+          <div className="bg-red-50 border border-red-200 rounded-xl p-6">
+            <div className="flex items-start gap-3">
+              <AlertTriangle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
+              <div>
+                <h4 className="text-base font-semibold text-red-900 mb-2">内存使用率警告</h4>
+                <p className="text-sm text-red-700">以下用户内存使用率已超过 90%，可能触发 OOM：</p>
+                <ul className="mt-2 space-y-1 text-sm text-red-700">
+                  {users
+                    .filter((u) => u.memLimitMiB > 0 && u.memUsageMiB / u.memLimitMiB >= 0.9)
+                    .map((user) => (
+                      <li key={user.username} className="flex items-center gap-2">
+                        <span className="font-medium">{user.username}</span>
+                        <span>
+                          ({((user.memUsageMiB / user.memLimitMiB) * 100).toFixed(1)}% -{' '}
+                          {user.memLimitMiB >= 1024
+                            ? `${(user.memUsageMiB / 1024).toFixed(2)} / ${(user.memLimitMiB / 1024).toFixed(1)} GiB`
+                            : `${Math.round(user.memUsageMiB)} / ${Math.round(user.memLimitMiB)} MiB`})
+                        </span>
+                      </li>
+                    ))}
+                </ul>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 闲置用户清理 */}
+        <div className="bg-white rounded-xl shadow-sm border border-slate-200">
+          <div className="p-6 border-b border-slate-200">
+            <div className="flex items-center gap-2">
+              <Clock className="w-5 h-5 text-orange-500" />
+              <h3 className="text-lg font-semibold text-slate-900">闲置用户清理</h3>
+            </div>
+            <p className="text-sm text-slate-500 mt-1">停止超过指定天数未活跃用户的 Notebook Server，释放计算资源</p>
+          </div>
+          <div className="p-6 space-y-4">
+            {/* 阈值选择 + 预览按钮 */}
+            <div className="flex items-center gap-3 flex-wrap">
+              <span className="text-sm font-medium text-slate-700">闲置超过：</span>
+              <div className="flex rounded-lg border border-slate-200 overflow-hidden text-sm">
+                {([3, 7, 15, 30] as const).map((d) => (
+                  <button
+                    key={d}
+                    onClick={() => {
+                      setCleanupThreshold(d);
+                      setCleanupPreview(null);
+                      setCleanupResults(null);
+                      setCleanupConfirming(false);
+                    }}
+                    className={`px-4 py-2 transition-colors ${cleanupThreshold === d
+                        ? 'bg-orange-500 text-white'
+                        : 'bg-white text-slate-600 hover:bg-slate-50'
+                      }`}
+                  >
+                    {d} 天
+                  </button>
+                ))}
+              </div>
+              <button
+                onClick={handleCleanupPreview}
+                disabled={cleanupLoading}
+                className="flex items-center gap-2 px-4 py-2 text-sm bg-slate-700 text-white rounded-lg hover:bg-slate-800 transition-colors disabled:opacity-60"
+              >
+                <RefreshCw className={`w-4 h-4 ${cleanupLoading && !cleanupConfirming ? 'animate-spin' : ''}`} />
+                预览受影响用户
+              </button>
+            </div>
+
+            {/* 预览 / 执行结果 */}
+            {cleanupPreview && (
+              <div className="border border-slate-200 rounded-lg overflow-hidden">
+                <div className="px-4 py-3 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
+                  <span className="text-sm font-medium text-slate-700">
+                    {cleanupPreview.total === 0
+                      ? `✓ 无用户超过 ${cleanupThreshold} 天未活跃`
+                      : `共 ${cleanupPreview.total} 个用户超过 ${cleanupThreshold} 天未活跃`}
+                  </span>
+                  {cleanupPreview.total > 0 && !cleanupResults && (
+                    cleanupConfirming ? (
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-red-600 font-medium">
+                          确认停止这 {cleanupPreview.total} 个用户的 Server？
+                        </span>
+                        <button
+                          onClick={handleCleanupExecute}
+                          disabled={cleanupLoading}
+                          className="px-3 py-1 text-xs bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-60"
+                        >
+                          {cleanupLoading ? '执行中...' : '确认'}
+                        </button>
+                        <button
+                          onClick={() => setCleanupConfirming(false)}
+                          disabled={cleanupLoading}
+                          className="px-3 py-1 text-xs bg-slate-200 text-slate-700 rounded hover:bg-slate-300"
+                        >
+                          取消
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={() => setCleanupConfirming(true)}
+                        className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
+                      >
+                        <PowerOff className="w-3.5 h-3.5" />
+                        执行清理
+                      </button>
+                    )
+                  )}
+                  {cleanupResults && (
+                    <span className="text-xs text-slate-500">
+                      {cleanupResults.filter((r) => r.success).length}/{cleanupResults.length} 成功
+                    </span>
+                  )}
+                </div>
+                {cleanupPreview.total > 0 && (
+                  <div className="divide-y divide-slate-100 max-h-64 overflow-y-auto">
+                    {cleanupPreview.affected.map((u) => {
+                      const result = cleanupResults?.find((r) => r.username === u.username);
+                      return (
+                        <div key={u.username} className="px-4 py-3 flex items-center justify-between">
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <span className="text-sm font-medium text-slate-900">{u.username}</span>
+                              {u.admin && (
+                                <span className="px-1.5 py-0.5 bg-blue-100 text-blue-700 text-xs rounded">管理员</span>
+                              )}
+                            </div>
+                            <p className="text-xs text-slate-500 mt-0.5">
+                              最后活跃：
+                              {u.lastActivity
+                                ? new Date(u.lastActivity).toLocaleString('zh-CN', { hour12: false })
+                                : '从未'}
+                              <span className="ml-1 text-orange-600 font-medium">（{u.daysIdle} 天前）</span>
+                            </p>
+                          </div>
+                          {result ? (
+                            <span className={`text-xs px-2 py-1 rounded ${result.success ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
+                              }`}>
+                              {result.message}
+                            </span>
+                          ) : (
+                            <span className="text-xs px-2 py-1 bg-orange-100 text-orange-700 rounded">待停止</span>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* 用户操作说明 */}
+        <div className="bg-white rounded-xl shadow-sm border border-slate-200">
+          <div className="p-6 border-b border-slate-200">
+            <h3 className="text-lg font-semibold text-slate-900">用户操作说明</h3>
+          </div>
+          <div className="p-6">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div className="p-4 bg-blue-50 border border-blue-200 rounded-lg">
+                <h5 className="text-sm font-medium text-blue-900 mb-2 flex items-center gap-2">
+                  <Power className="w-4 h-4" />
+                  启动用户 Server
+                </h5>
+                <p className="text-xs text-blue-700">
+                  启动用户的 Jupyter Notebook 容器，系统会自动分配一个计算节点。启动后用户可以访问其 Notebook 环境。
+                </p>
+              </div>
+              <div className="p-4 bg-red-50 border border-red-200 rounded-lg">
+                <h5 className="text-sm font-medium text-red-900 mb-2 flex items-center gap-2">
+                  <PowerOff className="w-4 h-4" />
+                  停止用户 Server
+                </h5>
+                <p className="text-xs text-red-700">
+                  停止用户的 Jupyter Notebook 容器，释放资源。用户数据会保留在 NFS 存储中，下次启动时可以恢复。
+                </p>
+              </div>
+            </div>
+            <div className="mt-4 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
+              <h5 className="text-sm font-medium text-yellow-900 mb-2 flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4" />
+                注意事项
+              </h5>
+              <ul className="text-xs text-yellow-700 space-y-1 list-disc list-inside">
+                <li>单个用户容器内存限制为 2G，超过限制会被 OOM Killer 终止</li>
+                <li>用户空闲 30 分钟后，系统会自动关闭其容器以释放资源</li>
+                <li>停止用户 server 不会删除用户数据，数据存储在 NFS 共享存储中</li>
+                <li>建议定期监控高内存使用用户，必要时联系用户优化代码</li>
+              </ul>
+            </div>
           </div>
         </div>
       </div>
-    </div>
-  );
+    );
+  };
 
   const renderOperations = () => (
     <div className="space-y-6">
