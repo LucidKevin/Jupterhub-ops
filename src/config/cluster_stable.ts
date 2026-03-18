@@ -49,10 +49,18 @@ export const CLUSTER_NODES_CONFIG: ClusterNodeConfig[] = [
 /** JupyterHub API 配置 */
 export const JUPYTERHUB_CONFIG = {
   /** JupyterHub 用户列表 API 地址（manager 节点） */
-  apiUrl: 'http://10.9.123.235:8000/jupyterhub/hub/api/users',
+  apiUrl: 'http://10.9.123.235:8002/jupyterhub/hub/api/users',
   /** API 访问 Token */
   token: '5b1682dcfca4461eb666851a8148bcb6',
 };
 
 /** Node Exporter 默认端口 */
 export const NODE_EXPORTER_PORT = 9100;
+
+export const MANAGER_NODE =
+  CLUSTER_NODES_CONFIG.find((node) => node.role === 'manager') ?? CLUSTER_NODES_CONFIG[0];
+
+export const NFS_CONFIG = {
+  exportPath: '/nfs/jupyterhub',
+  mountPath: '/nfs/jupyterhub',
+} as const;

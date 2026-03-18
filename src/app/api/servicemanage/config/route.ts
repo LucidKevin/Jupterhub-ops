@@ -9,16 +9,12 @@
  */
 import { NextResponse } from 'next/server';
 import { readFile } from 'fs/promises';
-
-const CONFIG_FILES = {
-  compose: '/opt/jupyterhub/docker-compose.yml',
-  hubConfig: '/opt/jupyterhub/config/jupyterhub_config.py',
-};
+import { SERVICE_CONFIG_FILES } from '@/config/service';
 
 export async function GET() {
   const [compose, hubConfig] = await Promise.all([
-    readFile(CONFIG_FILES.compose, 'utf-8').catch(() => null),
-    readFile(CONFIG_FILES.hubConfig, 'utf-8').catch(() => null),
+    readFile(SERVICE_CONFIG_FILES.compose, 'utf-8').catch(() => null),
+    readFile(SERVICE_CONFIG_FILES.hubConfig, 'utf-8').catch(() => null),
   ]);
 
   return NextResponse.json({ compose, hubConfig });

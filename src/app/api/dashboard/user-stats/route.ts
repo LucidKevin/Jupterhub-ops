@@ -42,6 +42,7 @@ import { NextResponse } from 'next/server';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { CLUSTER_NODES_CONFIG, JUPYTERHUB_CONFIG, NODE_EXPORTER_PORT } from '@/config/cluster';
+import { API_TIMEOUT_MS, SSH_PORT } from '@/config/service';
 
 const execAsync = promisify(exec);
 
@@ -82,7 +83,7 @@ async function fetchWorkerContainerStats(ip: string): Promise<
 > {
   try {
     const { stdout } = await execAsync(
-      `ssh -p 39000 -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@${ip} 'docker stats --no-stream --format "{{json .}}"'`
+      `ssh -p ${SSH_PORT} -o StrictHostKeyChecking=no -o ConnectTimeout=${Math.floor(API_TIMEOUT_MS.sshConnect / 1000)} root@${ip} 'docker stats --no-stream --format "{{json .}}"'`
     );
     return stdout
       .trim()
@@ -118,7 +119,7 @@ async function fetchWorkerMemoryGB(ip: string): Promise<{ totalGB: number; usedG
   try {
     const res = await fetch(`http://${ip}:${NODE_EXPORTER_PORT}/metrics`, {
       cache: 'no-store',
-      signal: AbortSignal.timeout(5000),
+      signal: AbortSignal.timeout(API_TIMEOUT_MS.nodeMetrics),
     });
     const text = await res.text();
     let memTotal = 0, memAvail = 0;

@@ -10,6 +10,7 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { JUPYTERHUB_CONFIG } from '@/config/cluster';
+import { API_TIMEOUT_MS } from '@/config/service';
 
 export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => null);
@@ -28,7 +29,7 @@ export async function POST(req: NextRequest) {
     const res = await fetch(url, {
       method: action === 'start' ? 'POST' : 'DELETE',
       headers: { Authorization: `token ${JUPYTERHUB_CONFIG.token}` },
-      signal: AbortSignal.timeout(15000),
+      signal: AbortSignal.timeout(API_TIMEOUT_MS.userServerAction),
     });
 
     const success = [201, 202, 204].includes(res.status);

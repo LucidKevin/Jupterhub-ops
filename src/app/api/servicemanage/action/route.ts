@@ -20,17 +20,16 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { exec } from 'child_process';
-
-const SCRIPTS: Record<string, string> = {
-  start:   '/opt/jupyterhub/start.sh',
-  stop:    '/opt/jupyterhub/stop.sh',
-  restart: '/opt/jupyterhub/restart.sh',
-};
+import {
+  SERVICE_MANAGE_EXEC_TIMEOUT_MS,
+  SERVICE_MANAGE_SCRIPTS,
+  SERVICE_MANAGE_WORKDIR,
+} from '@/config/service';
 
 export async function POST(req: NextRequest) {
   const { action } = await req.json();
 
-  const script = SCRIPTS[action];
+  const script = SERVICE_MANAGE_SCRIPTS[action as keyof typeof SERVICE_MANAGE_SCRIPTS];
   if (!script) {
     return NextResponse.json({ success: false, error: `未知操作: ${action}` }, { status: 400 });
   }
@@ -42,7 +41,7 @@ export async function POST(req: NextRequest) {
   }>((resolve) => {
     exec(
       `bash ${script}`,
-      { timeout: 60000, cwd: '/opt/jupyterhub' },
+      { timeout: SERVICE_MANAGE_EXEC_TIMEOUT_MS, cwd: SERVICE_MANAGE_WORKDIR },
       (error, stdout, stderr) => {
         // 无论成功失败，都保留 stdout/stderr，退出码由 error.code 判断
         resolve({ code: error?.code ?? 0, stdout, stderr });

@@ -25,6 +25,20 @@ import {
   Database,
   Wifi
 } from 'lucide-react';
+import {
+  CLEANUP_THRESHOLD_OPTIONS,
+  DASHBOARD_NODE_PLACEHOLDERS,
+  DASHBOARD_REFRESH_INTERVAL_MS,
+  DEFAULT_CLEANUP_THRESHOLD,
+  TOAST_HIDE_DELAY_MS,
+  type CleanupThreshold,
+} from '@/config/dashboard';
+import {
+  SERVICE_CONFIG_FILES,
+  SERVICE_LOG_FILES,
+  SERVICE_MANAGE_SCRIPTS,
+} from '@/config/service';
+import { MANAGER_NODE, NFS_CONFIG } from '@/config/cluster';
 
 type TabType = 'dashboard' | 'services' | 'nodes' | 'nfs' | 'resources' | 'logs' | 'operations' | 'users';
 
@@ -75,14 +89,19 @@ interface CleanupResult {
   message: string;
 }
 
-// 节点显示配置（与 src/config/cluster.ts 保持同步）
-// 作为初始占位数据，确保页面加载时节点列表不为空
-const DASHBOARD_NODE_CONFIG: NodeData[] = [
-  { id: 'node-235', name: '主节点 (10.9.123.235)', role: 'Manager', status: '加载中', cpu: 0, memory: 0, disk: 0, ip: '10.9.123.235', containers: 0, labels: ['manager', 'nfs-server'] },
-  { id: 'node-228', name: '计算节点1 (10.9.123.228)', role: 'Worker', status: '加载中', cpu: 0, memory: 0, disk: 0, ip: '10.9.123.228', containers: 0, labels: ['worker'] },
-  { id: 'node-229', name: '计算节点2 (10.9.123.229)', role: 'Worker', status: '加载中', cpu: 0, memory: 0, disk: 0, ip: '10.9.123.229', containers: 0, labels: ['worker'] },
-  { id: 'node-230', name: '计算节点3 (10.9.123.230)', role: 'Worker', status: '加载中', cpu: 0, memory: 0, disk: 0, ip: '10.9.123.230', containers: 0, labels: ['worker'] },
-];
+type LogLevel = 'all' | 'INFO' | 'WARNING' | 'ERROR';
+
+interface LogEntry {
+  line: string;
+  level: 'INFO' | 'WARNING' | 'ERROR';
+}
+
+function buildApiUrl(path: string): string {
+  const APP_BASE_PATH = '/ops';
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+  if (normalizedPath.startsWith(`${APP_BASE_PATH}/`)) return normalizedPath;
+  return `${APP_BASE_PATH}${normalizedPath}`;
+}
 
 export default function JupyterHubDashboard() {
   const [activeTab, setActiveTab] = useState<TabType>('dashboard');
@@ -108,7 +127,7 @@ export default function JupyterHubDashboard() {
    * 节点列表 —— 以 DASHBOARD_NODE_CONFIG 为初始值（静态占位），
    * 页面加载后由 /api/dashboard/cluster-nodes 和 /api/dashboard/node-metrics 的数据更新。
    */
-  const [nodes, setNodes] = useState<NodeData[]>(DASHBOARD_NODE_CONFIG);
+  const [nodes, setNodes] = useState<NodeData[]>(DASHBOARD_NODE_PLACEHOLDERS);
 
   /**
    * 仪表盘数据拉取函数（useCallback 避免在 useEffect 依赖中重复创建）
@@ -124,9 +143,9 @@ export default function JupyterHubDashboard() {
     setMetricsLoading(true);
     try {
       const [nodesRes, containersRes, metricsRes] = await Promise.allSettled([
-        fetch('/api/dashboard/cluster-nodes').then((r) => r.json()),
-        fetch('/api/dashboard/running-containers').then((r) => r.json()),
-        fetch('/api/dashboard/node-metrics').then((r) => r.json()),
+        fetch(buildApiUrl('/api/dashboard/cluster-nodes')).then((r) => r.json()),
+        fetch(buildApiUrl('/api/dashboard/running-containers')).then((r) => r.json()),
+        fetch(buildApiUrl('/api/dashboard/node-metrics')).then((r) => r.json()),
       ]);
 
       // 提取各 API 的 nodes 数组，失败时为空数组（不中断后续合并）
@@ -163,7 +182,7 @@ export default function JupyterHubDashboard() {
        * - node-metrics 成功时更新 cpu/memory/disk
        * - API 失败时 status 回退为 '未知'，containers 保留占位值 0
        */
-      const merged: NodeData[] = DASHBOARD_NODE_CONFIG.map((base) => {
+      const merged: NodeData[] = DASHBOARD_NODE_PLACEHOLDERS.map((base) => {
         const cn = clusterNodes.find((n: { ip: string }) => n.ip === base.ip);
         const m = metricsNodes.find((n: { ip: string }) => n.ip === base.ip);
         return {
@@ -183,7 +202,7 @@ export default function JupyterHubDashboard() {
 
       // 刷新成功，3 秒后自动隐藏提示
       setRefreshToast(true);
-      setTimeout(() => setRefreshToast(false), 3000);
+      setTimeout(() => setRefreshToast(false), TOAST_HIDE_DELAY_MS);
     } catch (err) {
       console.error('Failed to fetch dashboard data:', err);
     } finally {
@@ -194,7 +213,7 @@ export default function JupyterHubDashboard() {
   // 页面加载后立即拉取，并每 30 秒自动刷新一次
   useEffect(() => {
     fetchDashboardData();
-    const interval = setInterval(fetchDashboardData, 30000);
+    const interval = setInterval(fetchDashboardData, DASHBOARD_REFRESH_INTERVAL_MS);
     return () => clearInterval(interval);
   }, [fetchDashboardData]);
 
@@ -221,19 +240,51 @@ export default function JupyterHubDashboard() {
   const [userStatsData, setUserStatsData] = useState<UserStatsData | null>(null);
   const [userStatsLoading, setUserStatsLoading] = useState(false);
 
+  // 日志查看
+  const [logLevel, setLogLevel] = useState<LogLevel>('all');
+  const [logsData, setLogsData] = useState<LogEntry[]>([]);
+  const [logsLoading, setLogsLoading] = useState(false);
+  const [logsError, setLogsError] = useState<string | null>(null);
+
   // 切换到用户管理 tab 时懒加载用户数据（避免在 render 阶段 setState）
   useEffect(() => {
     if (activeTab !== 'users' || userStatsData || userStatsLoading) return;
     setUserStatsLoading(true);
-    fetch('/api/dashboard/user-stats')
+    fetch(buildApiUrl('/api/dashboard/user-stats'))
       .then((r) => r.json())
       .then((data: UserStatsData) => setUserStatsData(data))
       .catch(() => setUserStatsData({ totalUsers: 0, runningUsers: 0, stoppedUsers: 0, workerMemTotalGB: 0, workerMemUsedGB: 0, users: [] }))
       .finally(() => setUserStatsLoading(false));
   }, [activeTab, userStatsData, userStatsLoading]);
 
+  const fetchLogs = useCallback(async (level: LogLevel) => {
+    setLogsLoading(true);
+    setLogsError(null);
+    try {
+      const query = new URLSearchParams({ level, limit: '300' });
+      const res = await fetch(buildApiUrl(`/api/logcheck?${query.toString()}`), {
+        cache: 'no-store',
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) {
+        throw new Error(data.message || data.error || '日志加载失败');
+      }
+      setLogsData(Array.isArray(data.entries) ? data.entries : []);
+    } catch (error) {
+      setLogsError(error instanceof Error ? error.message : '日志加载失败');
+      setLogsData([]);
+    } finally {
+      setLogsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (activeTab !== 'logs') return;
+    fetchLogs(logLevel);
+  }, [activeTab, logLevel, fetchLogs]);
+
   // 闲置用户清理
-  const [cleanupThreshold, setCleanupThreshold] = useState<3 | 7 | 15 | 30>(7);
+  const [cleanupThreshold, setCleanupThreshold] = useState<CleanupThreshold>(DEFAULT_CLEANUP_THRESHOLD);
   const [cleanupLoading, setCleanupLoading] = useState(false);
   const [cleanupPreview, setCleanupPreview] = useState<{ total: number; affected: CleanupPreviewUser[] } | null>(null);
   const [cleanupResults, setCleanupResults] = useState<CleanupResult[] | null>(null);
@@ -609,7 +660,7 @@ export default function JupyterHubDashboard() {
     // 首次切换到服务管理 tab 时加载配置文件
     if (!serviceConfig && !serviceConfigLoading) {
       setServiceConfigLoading(true);
-      fetch('/api/servicemanage/config')
+      fetch(buildApiUrl('/api/servicemanage/config'))
         .then((r) => r.json())
         .then((data) => setServiceConfig(data))
         .catch(() => setServiceConfig({ compose: null, hubConfig: null }))
@@ -620,7 +671,7 @@ export default function JupyterHubDashboard() {
       setServiceAction(action === 'start' ? 'starting' : action === 'stop' ? 'stopping' : 'restarting');
       setServiceResult(null);
       try {
-        const res = await fetch('/api/servicemanage/action', {
+        const res = await fetch(buildApiUrl('/api/servicemanage/action'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ action }),
@@ -638,8 +689,8 @@ export default function JupyterHubDashboard() {
     const configContent = activeConfigTab === 'compose' ? serviceConfig?.compose : serviceConfig?.hubConfig;
     const configLabel = activeConfigTab === 'compose' ? 'docker-compose.yml' : 'jupyterhub_config.py';
     const configPath = activeConfigTab === 'compose'
-      ? '/opt/jupyterhub/docker-compose.yml'
-      : '/opt/jupyterhub/config/jupyterhub_config.py';
+      ? SERVICE_CONFIG_FILES.compose
+      : SERVICE_CONFIG_FILES.hubConfig;
 
     return (
       <div className="space-y-6">
@@ -677,8 +728,8 @@ export default function JupyterHubDashboard() {
           {/* 操作结果输出 */}
           {serviceResult && (
             <div className={`mx-6 mt-4 p-4 rounded-lg border text-sm ${serviceResult.success
-                ? 'bg-green-50 border-green-200 text-green-900'
-                : 'bg-red-50 border-red-200 text-red-900'
+              ? 'bg-green-50 border-green-200 text-green-900'
+              : 'bg-red-50 border-red-200 text-red-900'
               }`}>
               <p className="font-medium mb-1">{serviceResult.success ? '✓ 执行成功' : '✗ 执行失败'}</p>
               {serviceResult.error && <p className="text-xs mb-1 opacity-80">{serviceResult.error}</p>}
@@ -692,9 +743,9 @@ export default function JupyterHubDashboard() {
 
           <div className="p-6">
             <div className="text-sm text-slate-500 space-y-1">
-              <p>启动脚本：<code className="bg-slate-100 px-1 rounded">/opt/jupyterhub/start.sh</code></p>
-              <p>停止脚本：<code className="bg-slate-100 px-1 rounded">/opt/jupyterhub/stop.sh</code></p>
-              <p>重启脚本：<code className="bg-slate-100 px-1 rounded">/opt/jupyterhub/restart.sh</code></p>
+              <p>启动脚本：<code className="bg-slate-100 px-1 rounded">{SERVICE_MANAGE_SCRIPTS.start}</code></p>
+              <p>停止脚本：<code className="bg-slate-100 px-1 rounded">{SERVICE_MANAGE_SCRIPTS.stop}</code></p>
+              <p>重启脚本：<code className="bg-slate-100 px-1 rounded">{SERVICE_MANAGE_SCRIPTS.restart}</code></p>
             </div>
           </div>
         </div>
@@ -862,7 +913,9 @@ export default function JupyterHubDashboard() {
         <div className="p-6">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             <div>
-              <h4 className="text-base font-medium text-slate-900 mb-4">NFS 服务端 (10.9.123.235)</h4>
+              <h4 className="text-base font-medium text-slate-900 mb-4">
+                NFS 服务端 ({MANAGER_NODE.ip})
+              </h4>
               <div className="space-y-3">
                 <div className="flex items-center justify-between p-3 bg-green-50 border border-green-200 rounded-lg">
                   <div className="flex items-center gap-2">
@@ -882,7 +935,7 @@ export default function JupyterHubDashboard() {
               <div className="mt-4 p-4 bg-slate-50 rounded-lg">
                 <p className="text-xs text-slate-600 mb-2">共享目录:</p>
                 <code className="text-sm text-slate-900 bg-white p-2 rounded border border-slate-200 block">
-                  10.9.123.235:/nfs/jupyterhub
+                  {`${MANAGER_NODE.ip}:${NFS_CONFIG.exportPath}`}
                 </code>
               </div>
             </div>
@@ -1134,45 +1187,63 @@ export default function JupyterHubDashboard() {
           <div className="flex items-center justify-between">
             <h3 className="text-lg font-semibold text-slate-900">JupyterHub 日志</h3>
             <div className="flex gap-2">
-              <select className="px-3 py-2 text-sm border border-slate-300 rounded-lg">
-                <option>所有日志</option>
-                <option>INFO</option>
-                <option>WARNING</option>
-                <option>ERROR</option>
+              <select
+                value={logLevel}
+                onChange={(e) => setLogLevel(e.target.value as LogLevel)}
+                className="px-3 py-2 text-sm border border-slate-300 rounded-lg"
+              >
+                <option value="all">所有日志</option>
+                <option value="INFO">INFO</option>
+                <option value="WARNING">WARNING</option>
+                <option value="ERROR">ERROR</option>
               </select>
-              <button className="flex items-center gap-2 px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700">
-                <RefreshCw className="w-4 h-4" />
-                刷新
+              <button
+                onClick={() => fetchLogs(logLevel)}
+                disabled={logsLoading}
+                className="flex items-center gap-2 px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-60"
+              >
+                <RefreshCw className={`w-4 h-4 ${logsLoading ? 'animate-spin' : ''}`} />
+                {logsLoading ? '刷新中...' : '刷新'}
               </button>
-              <button className="flex items-center gap-2 px-4 py-2 text-sm bg-slate-600 text-white rounded-lg hover:bg-slate-700">
+              <a
+                href={buildApiUrl(`/api/logcheck?level=${encodeURIComponent(logLevel)}&limit=1000&download=1`)}
+                className="flex items-center gap-2 px-4 py-2 text-sm bg-slate-600 text-white rounded-lg hover:bg-slate-700"
+              >
                 下载
-              </button>
+              </a>
             </div>
           </div>
         </div>
         <div className="p-6">
           <div className="bg-slate-900 text-slate-100 rounded-lg p-4 font-mono text-sm max-h-96 overflow-y-auto">
-            <div className="space-y-1">
-              <p className="text-green-400">[2024-01-15 14:30:00] [INFO] Starting JupyterHub server...</p>
-              <p className="text-blue-400">[2024-01-15 14:30:05] [INFO] Using authenticator: jupyterhub.auth.PAMAuthenticator</p>
-              <p className="text-blue-400">[2024-01-15 14:30:06] [INFO] Using spawner: dockerspawner.DockerSpawner</p>
-              <p className="text-green-400">[2024-01-15 14:30:10] [INFO] JupyterHub is now running at http://10.9.123.235:8000</p>
-              <p className="text-yellow-400">[2024-01-15 14:31:15] [WARNING] Node 10.9.123.230 memory usage at 85%</p>
-              <p className="text-green-400">[2024-01-15 14:32:00] [INFO] User 'admin' logged in</p>
-              <p className="text-green-400">[2024-01-15 14:32:05] [INFO] Spawning container for user 'admin' on node-228</p>
-              <p className="text-green-400">[2024-01-15 14:32:30] [INFO] Container 'jupyter-admin' is running</p>
-              <p className="text-green-400">[2024-01-15 14:33:00] [INFO] User 'user1' logged in</p>
-              <p className="text-green-400">[2024-01-15 14:33:05] [INFO] Spawning container for user 'user1' on node-229</p>
-              <p className="text-red-400">[2024-01-15 14:35:00] [ERROR] Container jupyter-user4 OOM Killed</p>
-              <p className="text-yellow-400">[2024-01-15 14:35:05] [WARNING] Node 10.9.123.230 is approaching OOM threshold</p>
-              <p className="text-green-400">[2024-01-15 14:36:00] [INFO] Idle container 'jupyter-user2' has been culled after 30 minutes</p>
-              <p className="text-blue-400">[2024-01-15 14:37:00] [INFO] Health check passed for all services</p>
-            </div>
+            {logsError ? (
+              <p className="text-red-400">{logsError}</p>
+            ) : logsLoading && logsData.length === 0 ? (
+              <p className="text-slate-400">日志加载中...</p>
+            ) : logsData.length === 0 ? (
+              <p className="text-slate-400">暂无日志数据</p>
+            ) : (
+              <div className="space-y-1">
+                {logsData.map((entry, idx) => {
+                  const levelClass =
+                    entry.level === 'ERROR'
+                      ? 'text-red-400'
+                      : entry.level === 'WARNING'
+                        ? 'text-yellow-400'
+                        : 'text-blue-400';
+                  return (
+                    <p key={`${idx}-${entry.line}`} className={levelClass}>
+                      {entry.line}
+                    </p>
+                  );
+                })}
+              </div>
+            )}
           </div>
           <div className="mt-4 p-4 bg-slate-50 rounded-lg border border-slate-200">
             <p className="text-xs text-slate-600">
-              <strong>日志文件位置:</strong> /opt/jupyterhub/logs/jupyterhub.log<br />
-              <strong>日志轮转:</strong> 保留 15 天，配置文件: /etc/logrotate.d/jupyterhub
+              <strong>日志文件位置:</strong> {SERVICE_LOG_FILES.jupyterhub}<br />
+              <strong>日志轮转:</strong> 保留 15 天，配置文件: {SERVICE_LOG_FILES.logrotateConfig}
             </p>
           </div>
         </div>
@@ -1183,7 +1254,7 @@ export default function JupyterHubDashboard() {
   const renderUsers = () => {
     const doFetchUserStats = () => {
       setUserStatsLoading(true);
-      fetch('/api/dashboard/user-stats')
+      fetch(buildApiUrl('/api/dashboard/user-stats'))
         .then((r) => r.json())
         .then((data: UserStatsData) => setUserStatsData(data))
         .catch(() => { })
@@ -1196,7 +1267,7 @@ export default function JupyterHubDashboard() {
       setCleanupResults(null);
       setCleanupConfirming(false);
       try {
-        const res = await fetch('/api/users/cleanup', {
+        const res = await fetch(buildApiUrl('/api/users/cleanup'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ thresholdDays: cleanupThreshold, dryRun: true }),
@@ -1214,7 +1285,7 @@ export default function JupyterHubDashboard() {
       setCleanupLoading(true);
       setCleanupConfirming(false);
       try {
-        const res = await fetch('/api/users/cleanup', {
+        const res = await fetch(buildApiUrl('/api/users/cleanup'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ thresholdDays: cleanupThreshold, dryRun: false }),
@@ -1355,8 +1426,8 @@ export default function JupyterHubDashboard() {
                         </td>
                         <td className="py-4 px-4">
                           <span className={`px-3 py-1 text-xs rounded-full font-medium ${user.status === 'running'
-                              ? 'bg-green-100 text-green-700'
-                              : 'bg-red-100 text-red-700'
+                            ? 'bg-green-100 text-green-700'
+                            : 'bg-red-100 text-red-700'
                             }`}>
                             {user.status === 'running' ? '运行中' : '已停止'}
                           </span>
@@ -1399,7 +1470,7 @@ export default function JupyterHubDashboard() {
                             <button
                               onClick={async () => {
                                 setUserActionLoading(user.username);
-                                await fetch('/api/users/server', {
+                                await fetch(buildApiUrl('/api/users/server'), {
                                   method: 'POST',
                                   headers: { 'Content-Type': 'application/json' },
                                   body: JSON.stringify({ action: 'stop', username: user.username }),
@@ -1417,7 +1488,7 @@ export default function JupyterHubDashboard() {
                             <button
                               onClick={async () => {
                                 setUserActionLoading(user.username);
-                                await fetch('/api/users/server', {
+                                await fetch(buildApiUrl('/api/users/server'), {
                                   method: 'POST',
                                   headers: { 'Content-Type': 'application/json' },
                                   body: JSON.stringify({ action: 'start', username: user.username }),
@@ -1484,7 +1555,7 @@ export default function JupyterHubDashboard() {
             <div className="flex items-center gap-3 flex-wrap">
               <span className="text-sm font-medium text-slate-700">闲置超过：</span>
               <div className="flex rounded-lg border border-slate-200 overflow-hidden text-sm">
-                {([3, 7, 15, 30] as const).map((d) => (
+                {CLEANUP_THRESHOLD_OPTIONS.map((d) => (
                   <button
                     key={d}
                     onClick={() => {
@@ -1494,8 +1565,8 @@ export default function JupyterHubDashboard() {
                       setCleanupConfirming(false);
                     }}
                     className={`px-4 py-2 transition-colors ${cleanupThreshold === d
-                        ? 'bg-orange-500 text-white'
-                        : 'bg-white text-slate-600 hover:bg-slate-50'
+                      ? 'bg-orange-500 text-white'
+                      : 'bg-white text-slate-600 hover:bg-slate-50'
                       }`}
                   >
                     {d} 天
@@ -1729,7 +1800,9 @@ export default function JupyterHubDashboard() {
                   <p className="text-xs text-slate-500 mt-1">验证 NFS 挂载状态（计算节点）</p>
                 </div>
                 <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
-                  <code className="text-sm text-slate-700 block">mount -t nfs 10.9.123.235:/nfs/jupyterhub /nfs/jupyterhub</code>
+                  <code className="text-sm text-slate-700 block">
+                    {`mount -t nfs ${MANAGER_NODE.ip}:${NFS_CONFIG.exportPath} ${NFS_CONFIG.mountPath}`}
+                  </code>
                   <p className="text-xs text-slate-500 mt-1">手动重新挂载 NFS（计算节点）</p>
                 </div>
               </div>

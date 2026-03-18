@@ -1,8 +1,7 @@
 /** @type {import('next').NextConfig} */
-const path = require('path');
-
 const nextConfig = {
   reactStrictMode: true,
+  basePath: '/ops',
   // Node.js 16 兼容配置
   images: {
     remotePatterns: [

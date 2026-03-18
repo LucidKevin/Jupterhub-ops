@@ -49,3 +49,11 @@ export const JUPYTERHUB_CONFIG = {
 
 /** Node Exporter 默认端口 */
 export const NODE_EXPORTER_PORT = 9100;
+
+export const MANAGER_NODE =
+  CLUSTER_NODES_CONFIG.find((node) => node.role === 'manager') ?? CLUSTER_NODES_CONFIG[0];
+
+export const NFS_CONFIG = {
+  exportPath: '/nfs/jupyterhub',
+  mountPath: '/nfs/jupyterhub',
+} as const;

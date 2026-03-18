@@ -37,6 +37,7 @@ import { NextResponse } from 'next/server';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { CLUSTER_NODES_CONFIG } from '@/config/cluster';
+import { API_TIMEOUT_MS, SSH_PORT } from '@/config/service';
 
 const execAsync = promisify(exec);
 
@@ -70,7 +71,7 @@ async function getManagerContainerCount(): Promise<number> {
 async function getWorkerContainerCount(ip: string): Promise<number> {
   try {
     const { stdout } = await execAsync(
-      `ssh -p 39000 -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@${ip} 'docker ps -q | wc -l'`
+      `ssh -p ${SSH_PORT} -o StrictHostKeyChecking=no -o ConnectTimeout=${Math.floor(API_TIMEOUT_MS.sshConnect / 1000)} root@${ip} 'docker ps -q | wc -l'`
     );
     return parseInt(stdout.trim(), 10) || 0;
   } catch {

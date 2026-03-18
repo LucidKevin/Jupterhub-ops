@@ -26,8 +26,10 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { JUPYTERHUB_CONFIG } from '@/config/cluster';
+import { CLEANUP_THRESHOLD_OPTIONS } from '@/config/dashboard';
+import { API_TIMEOUT_MS } from '@/config/service';
 
-const ALLOWED_THRESHOLDS = [3, 7, 15, 30] as const;
+const ALLOWED_THRESHOLDS = CLEANUP_THRESHOLD_OPTIONS;
 type ThresholdDays = typeof ALLOWED_THRESHOLDS[number];
 
 interface JupyterUser {
@@ -67,7 +69,7 @@ export async function POST(req: NextRequest) {
     const res = await fetch(JUPYTERHUB_CONFIG.apiUrl, {
       headers: { Authorization: `token ${JUPYTERHUB_CONFIG.token}` },
       cache: 'no-store',
-      signal: AbortSignal.timeout(10000),
+      signal: AbortSignal.timeout(API_TIMEOUT_MS.cleanupAction),
     });
     const data = await res.json();
     if (!Array.isArray(data)) {
@@ -104,7 +106,7 @@ export async function POST(req: NextRequest) {
         const res = await fetch(`${apiBase}/users/${encodeURIComponent(username)}/server`, {
           method: 'DELETE',
           headers: { Authorization: `token ${JUPYTERHUB_CONFIG.token}` },
-          signal: AbortSignal.timeout(10000),
+          signal: AbortSignal.timeout(API_TIMEOUT_MS.cleanupAction),
         });
         const success = res.status === 204 || res.status === 202;
         return { username, success, message: success ? '已停止' : `失败 (HTTP ${res.status})` };

@@ -34,6 +34,7 @@
  */
 import { NextResponse } from 'next/server';
 import { CLUSTER_NODES_CONFIG, NODE_EXPORTER_PORT } from '@/config/cluster';
+import { API_TIMEOUT_MS } from '@/config/service';
 
 /** Prometheus 文本格式中的单条指标记录 */
 interface MetricEntry {
@@ -90,7 +91,7 @@ async function fetchMetrics(ip: string): Promise<Map<string, MetricEntry[]> | nu
   try {
     const res = await fetch(`http://${ip}:${NODE_EXPORTER_PORT}/metrics`, {
       cache: 'no-store',
-      signal: AbortSignal.timeout(5000),
+      signal: AbortSignal.timeout(API_TIMEOUT_MS.nodeMetrics),
     });
     if (!res.ok) return null;
     return parsePrometheusMetrics(await res.text());
