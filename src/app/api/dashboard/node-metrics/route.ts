@@ -35,6 +35,7 @@
 import { NextResponse } from 'next/server';
 import { CLUSTER_NODES_CONFIG, NODE_EXPORTER_PORT } from '@/config/cluster';
 import { API_TIMEOUT_MS } from '@/config/service';
+import { requireAdmin } from '@/lib/guard';
 
 /** Prometheus 文本格式中的单条指标记录 */
 interface MetricEntry {
@@ -145,6 +146,8 @@ function getDiskUsage(metrics: Map<string, MetricEntry[]>): number | null {
 }
 
 export async function GET() {
+  const auth = requireAdmin();
+  if (auth.error) return auth.error;
   try {
     // 从配置文件读取所有节点 IP，不在此处硬编码
     const ips = CLUSTER_NODES_CONFIG.map((n) => n.ip);

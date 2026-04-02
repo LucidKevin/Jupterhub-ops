@@ -38,6 +38,7 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import { CLUSTER_NODES_CONFIG } from '@/config/cluster';
 import { API_TIMEOUT_MS, SSH_PORT } from '@/config/service';
+import { requireAdmin } from '@/lib/guard';
 
 const execAsync = promisify(exec);
 
@@ -50,28 +51,18 @@ interface DockerNode {
   ManagerStatus: string; // Leader | Reachable | ""（worker 为空）
 }
 
-/**
- * 获取本机（Manager 节点）正在运行的 Docker 容器数量。
- * 直接在本地执行 docker ps，无需 SSH。
- * 返回 0 表示 JupyterHub 已停机。
- */
-async function getManagerContainerCount(): Promise<number> {
-  try {
-    const { stdout } = await execAsync("docker ps -q | wc -l");
-    return parseInt(stdout.trim(), 10) || 0;
-  } catch {
-    return 0;
-  }
+function inferRole(managerStatus: string): 'manager' | 'worker' {
+  return managerStatus === 'Leader' || managerStatus === 'Reachable' ? 'manager' : 'worker';
 }
 
 /**
- * 通过 SSH 获取指定 worker 节点上正在运行的 Docker 容器数量。
- * 连接超时 5 秒，失败时返回 0（不阻塞整体响应）。
+ * 获取本机（Manager 节点）正在运行的 Jupyter 用户容器数量。
+ * 仅统计容器名以 jupyter- 开头的容器。
  */
-async function getWorkerContainerCount(ip: string): Promise<number> {
+async function getManagerContainerCount(): Promise<number> {
   try {
     const { stdout } = await execAsync(
-      `ssh -p ${SSH_PORT} -o StrictHostKeyChecking=no -o ConnectTimeout=${Math.floor(API_TIMEOUT_MS.sshConnect / 1000)} root@${ip} 'docker ps -q | wc -l'`
+      'sh -lc \'docker ps --format "{{.Names}}" | grep -E -c "(^jupyter-|jupyterhub)" || true\''
     );
     return parseInt(stdout.trim(), 10) || 0;
   } catch {
@@ -79,7 +70,35 @@ async function getWorkerContainerCount(ip: string): Promise<number> {
   }
 }
 
+/**
+ * 通过 SSH 获取指定 worker 节点上正在运行的 Jupyter 用户容器数量。
+ * 仅统计容器名以 jupyter- 开头的容器；失败时返回 0。
+ */
+async function getWorkerContainerCount(ip: string): Promise<number> {
+  if (!ip) return 0;
+  try {
+    const { stdout } = await execAsync(
+      `ssh -p ${SSH_PORT} -o StrictHostKeyChecking=no -o ConnectTimeout=${Math.floor(API_TIMEOUT_MS.sshConnect / 1000)} root@${ip} 'sh -lc '"'"'docker ps --format "{{.Names}}" | grep -E -c "(^jupyter-|jupyterhub)" || true'"'"''`
+    );
+    return parseInt(stdout.trim(), 10) || 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** 配置缺失时，回退通过 node inspect 获取节点 IP */
+async function getNodeIpByInspect(nodeId: string): Promise<string> {
+  try {
+    const { stdout } = await execAsync(`docker node inspect ${nodeId} --format '{{ .Status.Addr }}'`);
+    return stdout.trim();
+  } catch {
+    return '';
+  }
+}
+
 export async function GET() {
+  const auth = requireAdmin();
+  if (auth.error) return auth.error;
   try {
     // 以 NDJSON 格式获取节点列表（每行一个 JSON 对象）
     const { stdout } = await execAsync('docker node ls --format "{{json .}}"');
@@ -103,20 +122,23 @@ export async function GET() {
     const workerNodes = totalNodes - managerNodes;
 
     // 用 cluster.ts 配置补全 docker 输出中没有的字段（IP、displayName、role、labels）
-    const enriched = dockerNodes.map((dockerNode) => {
-      const config = CLUSTER_NODES_CONFIG.find((c) => c.hostname === dockerNode.Hostname);
-      return {
-        id: dockerNode.ID,
-        hostname: dockerNode.Hostname,
-        displayName: config?.displayName ?? dockerNode.Hostname,
-        ip: config?.ip ?? '',
-        role: config?.role ?? 'worker',
-        status: dockerNode.Status,
-        availability: dockerNode.Availability,
-        managerStatus: dockerNode.ManagerStatus,
-        labels: config?.labels ?? [],
-      };
-    });
+    const enriched = await Promise.all(
+      dockerNodes.map(async (dockerNode) => {
+        const config = CLUSTER_NODES_CONFIG.find((c) => c.hostname === dockerNode.Hostname);
+        const fallbackIp = config?.ip || (await getNodeIpByInspect(dockerNode.ID));
+        return {
+          id: dockerNode.ID,
+          hostname: dockerNode.Hostname,
+          displayName: config?.displayName ?? dockerNode.Hostname,
+          ip: fallbackIp,
+          role: config?.role ?? inferRole(dockerNode.ManagerStatus),
+          status: dockerNode.Status,
+          availability: dockerNode.Availability,
+          managerStatus: dockerNode.ManagerStatus,
+          labels: config?.labels ?? [],
+        };
+      })
+    );
 
     // 并发获取各 worker 节点容器数（manager 默认为 1）
     const nodes = await Promise.all(

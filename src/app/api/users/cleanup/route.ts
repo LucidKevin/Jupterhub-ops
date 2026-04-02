@@ -28,6 +28,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { JUPYTERHUB_CONFIG } from '@/config/cluster';
 import { CLEANUP_THRESHOLD_OPTIONS } from '@/config/dashboard';
 import { API_TIMEOUT_MS } from '@/config/service';
+import { requireAdmin } from '@/lib/guard';
 
 const ALLOWED_THRESHOLDS = CLEANUP_THRESHOLD_OPTIONS;
 type ThresholdDays = typeof ALLOWED_THRESHOLDS[number];
@@ -51,6 +52,8 @@ function calcDaysIdle(lastActivity: string | null): number | null {
 }
 
 export async function POST(req: NextRequest) {
+  const auth = requireAdmin();
+  if (auth.error) return auth.error;
   const body = await req.json().catch(() => null);
   if (!body) return NextResponse.json({ error: '请求体格式错误' }, { status: 400 });
 

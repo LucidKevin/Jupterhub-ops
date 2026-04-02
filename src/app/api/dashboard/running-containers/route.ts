@@ -18,6 +18,7 @@
  */
 import { NextResponse } from 'next/server';
 import { JUPYTERHUB_CONFIG } from '@/config/cluster';
+import { requireAdmin } from '@/lib/guard';
 
 /** JupyterHub GET /hub/api/users 返回的用户对象（仅使用到的字段） */
 interface JupyterUser {
@@ -28,6 +29,8 @@ interface JupyterUser {
 }
 
 export async function GET() {
+  const auth = requireAdmin();
+  if (auth.error) return auth.error;
   try {
     const response = await fetch(JUPYTERHUB_CONFIG.apiUrl, {
       headers: {
@@ -47,8 +50,8 @@ export async function GET() {
     // servers 对象非空 → 至少有一个容器正在运行
     const runningContainers = users.filter(
       (u) => u.servers && Object.keys(u.servers).length > 0
-    ).length;
-    const totalUsers = users.length;
+    ).length+1; // 加上 JupyterHub 本身
+    const totalUsers = users.length+1;
     const stoppedContainers = totalUsers - runningContainers;
 
     return NextResponse.json({ runningContainers, totalUsers, stoppedContainers });

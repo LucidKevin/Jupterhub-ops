@@ -43,6 +43,7 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import { CLUSTER_NODES_CONFIG, JUPYTERHUB_CONFIG, NODE_EXPORTER_PORT } from '@/config/cluster';
 import { API_TIMEOUT_MS, SSH_PORT } from '@/config/service';
+import { requireAdmin } from '@/lib/guard';
 
 const execAsync = promisify(exec);
 
@@ -138,6 +139,8 @@ async function fetchWorkerMemoryGB(ip: string): Promise<{ totalGB: number; usedG
 }
 
 export async function GET() {
+  const auth = requireAdmin();
+  if (auth.error) return auth.error;
   const workerNodes = CLUSTER_NODES_CONFIG.filter((n) => n.role === 'worker');
 
   // 并发请求：JupyterHub 用户列表 + 各 worker 节点的容器统计和内存数据

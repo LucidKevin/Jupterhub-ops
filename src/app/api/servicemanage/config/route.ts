@@ -10,8 +10,11 @@
 import { NextResponse } from 'next/server';
 import { readFile } from 'fs/promises';
 import { SERVICE_CONFIG_FILES } from '@/config/service';
+import { requireAdmin } from '@/lib/guard';
 
 export async function GET() {
+  const auth = requireAdmin();
+  if (auth.error) return auth.error;
   const [compose, hubConfig] = await Promise.all([
     readFile(SERVICE_CONFIG_FILES.compose, 'utf-8').catch(() => null),
     readFile(SERVICE_CONFIG_FILES.hubConfig, 'utf-8').catch(() => null),

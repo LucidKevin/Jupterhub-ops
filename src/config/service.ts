@@ -22,6 +22,9 @@ export const SERVICE_LOG_FILES = {
   logrotateConfig: '/etc/logrotate.d/jupyterhub',
 } as const;
 
+export const SERVICE_LOG_DIR = '/opt/jupyterhub/logs';
+export const SERVICE_LOG_RETENTION_DAYS = 15;
+
 export const API_TIMEOUT_MS = {
   sshConnect: 5_000,
   userServerAction: 15_000,

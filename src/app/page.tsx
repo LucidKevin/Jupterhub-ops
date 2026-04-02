@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, type FormEvent } from 'react';
 import {
   LayoutDashboard,
   Server,
@@ -39,6 +39,13 @@ import {
   SERVICE_MANAGE_SCRIPTS,
 } from '@/config/service';
 import { MANAGER_NODE, NFS_CONFIG } from '@/config/cluster';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 
 type TabType = 'dashboard' | 'services' | 'nodes' | 'nfs' | 'resources' | 'logs' | 'operations' | 'users';
 
@@ -96,6 +103,18 @@ interface LogEntry {
   level: 'INFO' | 'WARNING' | 'ERROR';
 }
 
+interface LogDateOption {
+  key: 'today' | string; // today | YYYYMMDD
+  label: string;         // 今天 | YYYY-MM-DD
+  iso: string;           // YYYY-MM-DD
+  filename: string;      // server-side path (for display only)
+}
+
+interface AuthUser {
+  username: string;
+  isAdmin: boolean;
+}
+
 function buildApiUrl(path: string): string {
   const APP_BASE_PATH = '/ops';
   const normalizedPath = path.startsWith('/') ? path : `/${path}`;
@@ -104,6 +123,12 @@ function buildApiUrl(path: string): string {
 }
 
 export default function JupyterHubDashboard() {
+  const [authChecking, setAuthChecking] = useState(true);
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  const [loginUsername, setLoginUsername] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [loginLoading, setLoginLoading] = useState(false);
+  const [loginError, setLoginError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<TabType>('dashboard');
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({
     monitoring: true,
@@ -118,6 +143,7 @@ export default function JupyterHubDashboard() {
   const [workerNodes, setWorkerNodes] = useState<number>(3);
   const [runningContainers, setRunningContainers] = useState<number | null>(null);
   const [stoppedContainers, setStoppedContainers] = useState<number>(0);
+  const [totalContainers, setTotalContainers] = useState<number | null>(null);
   const [avgCpu, setAvgCpu] = useState<number | null>(null);      // 来自 node-metrics API
   const [avgMemory, setAvgMemory] = useState<number | null>(null); // 来自 node-metrics API
   const [metricsLoading, setMetricsLoading] = useState(true);
@@ -163,10 +189,15 @@ export default function JupyterHubDashboard() {
         setTotalNodes(nodesRes.value.totalNodes);
         setManagerNodes(nodesRes.value.managerNodes);
         setWorkerNodes(nodesRes.value.workerNodes);
-        // 运行容器总数来自 cluster-nodes（SSH docker ps + manager 默认1）
-        setRunningContainers(nodesRes.value.totalContainers);
+        setTotalContainers(nodesRes.value.totalContainers);
+        // running-containers 接口失败时，运行容器数兜底使用 cluster-nodes 的 totalContainers
+        if (!(containersRes.status === 'fulfilled' && !containersRes.value.error)) {
+          setRunningContainers(nodesRes.value.totalContainers);
+        }
       }
       if (containersRes.status === 'fulfilled' && !containersRes.value.error) {
+        // 运行中/已停止容器统一使用 running-containers 接口口径（JupyterHub users API）
+        setRunningContainers(containersRes.value.runningContainers);
         // stoppedContainers 仍从 JupyterHub API 获取（已停止的用户数）
         setStoppedContainers(containersRes.value.stoppedContainers);
       }
@@ -210,12 +241,36 @@ export default function JupyterHubDashboard() {
     }
   }, []);
 
+  useEffect(() => {
+    let mounted = true;
+    fetch(buildApiUrl('/api/auth/me'), { cache: 'no-store' })
+      .then(async (res) => {
+        if (!mounted) return;
+        if (!res.ok) {
+          setAuthUser(null);
+          return;
+        }
+        const data = (await res.json()) as AuthUser;
+        setAuthUser(data);
+      })
+      .catch(() => {
+        if (mounted) setAuthUser(null);
+      })
+      .finally(() => {
+        if (mounted) setAuthChecking(false);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
   // 页面加载后立即拉取，并每 30 秒自动刷新一次
   useEffect(() => {
+    if (!authUser) return;
     fetchDashboardData();
     const interval = setInterval(fetchDashboardData, DASHBOARD_REFRESH_INTERVAL_MS);
     return () => clearInterval(interval);
-  }, [fetchDashboardData]);
+  }, [authUser, fetchDashboardData]);
 
   // 模拟数据 - 集群状态（用于侧边栏显示）
   const clusterStatus = {
@@ -224,7 +279,7 @@ export default function JupyterHubDashboard() {
     workerNodes: workerNodes,
     onlineNodes: totalNodes ?? 4,
     offlineNodes: 0,
-    totalContainers: (runningContainers ?? 0) + stoppedContainers,
+    totalContainers: totalContainers ?? ((runningContainers ?? 0) + stoppedContainers),
     runningContainers: runningContainers ?? 0,
     stoppedContainers,
   };
@@ -239,12 +294,17 @@ export default function JupyterHubDashboard() {
   // 用户管理实时数据
   const [userStatsData, setUserStatsData] = useState<UserStatsData | null>(null);
   const [userStatsLoading, setUserStatsLoading] = useState(false);
+  const [userNodeFilter, setUserNodeFilter] = useState<'all' | string>('all');
 
   // 日志查看
   const [logLevel, setLogLevel] = useState<LogLevel>('all');
+  const [logDateOptions, setLogDateOptions] = useState<LogDateOption[]>([]);
+  const [logDate, setLogDate] = useState<'today' | string>('today');
+  const [logLineLimit, setLogLineLimit] = useState<number>(300);
   const [logsData, setLogsData] = useState<LogEntry[]>([]);
   const [logsLoading, setLogsLoading] = useState(false);
   const [logsError, setLogsError] = useState<string | null>(null);
+  const [logsSource, setLogsSource] = useState<string | null>(null);
 
   // 切换到用户管理 tab 时懒加载用户数据（避免在 render 阶段 setState）
   useEffect(() => {
@@ -257,11 +317,28 @@ export default function JupyterHubDashboard() {
       .finally(() => setUserStatsLoading(false));
   }, [activeTab, userStatsData, userStatsLoading]);
 
-  const fetchLogs = useCallback(async (level: LogLevel) => {
+  const fetchLogDates = useCallback(async () => {
+    try {
+      const res = await fetch(buildApiUrl('/api/logcheck/dates'), { cache: 'no-store' });
+      const data = await res.json();
+      const options: LogDateOption[] = Array.isArray(data.options) ? data.options : [];
+      setLogDateOptions(options);
+      // 若当前选中的 key 不在列表内，则回退到 today
+      if (options.length > 0 && !options.some((o) => o.key === logDate)) {
+        setLogDate('today');
+      }
+    } catch {
+      setLogDateOptions([{ key: 'today', label: '今天', iso: '', filename: '' }]);
+      setLogDate('today');
+    }
+  }, [logDate]);
+
+  const fetchLogs = useCallback(async (level: LogLevel, dateKey: string, limitLines: number) => {
     setLogsLoading(true);
     setLogsError(null);
     try {
-      const query = new URLSearchParams({ level, limit: '300' });
+      const safeLimit = Number.isFinite(limitLines) ? Math.min(Math.max(limitLines, 1), 2000) : 300;
+      const query = new URLSearchParams({ level, limit: String(safeLimit), date: dateKey });
       const res = await fetch(buildApiUrl(`/api/logcheck?${query.toString()}`), {
         cache: 'no-store',
       });
@@ -270,9 +347,11 @@ export default function JupyterHubDashboard() {
         throw new Error(data.message || data.error || '日志加载失败');
       }
       setLogsData(Array.isArray(data.entries) ? data.entries : []);
+      setLogsSource(typeof data.source === 'string' ? data.source : null);
     } catch (error) {
       setLogsError(error instanceof Error ? error.message : '日志加载失败');
       setLogsData([]);
+      setLogsSource(null);
     } finally {
       setLogsLoading(false);
     }
@@ -280,8 +359,9 @@ export default function JupyterHubDashboard() {
 
   useEffect(() => {
     if (activeTab !== 'logs') return;
-    fetchLogs(logLevel);
-  }, [activeTab, logLevel, fetchLogs]);
+    fetchLogDates();
+    fetchLogs(logLevel, logDate, logLineLimit);
+  }, [activeTab, logLevel, logDate, logLineLimit, fetchLogDates, fetchLogs]);
 
   // 闲置用户清理
   const [cleanupThreshold, setCleanupThreshold] = useState<CleanupThreshold>(DEFAULT_CLEANUP_THRESHOLD);
@@ -686,6 +766,7 @@ export default function JupyterHubDashboard() {
     };
 
     const actionBusy = serviceAction !== 'idle';
+    const actionDisabled = true;
     const configContent = activeConfigTab === 'compose' ? serviceConfig?.compose : serviceConfig?.hubConfig;
     const configLabel = activeConfigTab === 'compose' ? 'docker-compose.yml' : 'jupyterhub_config.py';
     const configPath = activeConfigTab === 'compose'
@@ -702,27 +783,30 @@ export default function JupyterHubDashboard() {
               <div className="flex gap-2">
                 <button
                   onClick={() => handleAction('start')}
-                  disabled={actionBusy}
+                  disabled={actionBusy || actionDisabled}
                   className="flex items-center gap-2 px-4 py-2 text-sm bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors disabled:opacity-60">
                   <Power className="w-4 h-4" />
                   {serviceAction === 'starting' ? '启动中...' : '启动服务'}
                 </button>
                 <button
                   onClick={() => handleAction('restart')}
-                  disabled={actionBusy}
+                  disabled={actionBusy || actionDisabled}
                   className="flex items-center gap-2 px-4 py-2 text-sm bg-yellow-600 text-white rounded-lg hover:bg-yellow-700 transition-colors disabled:opacity-60">
                   <RefreshCw className={`w-4 h-4 ${serviceAction === 'restarting' ? 'animate-spin' : ''}`} />
                   {serviceAction === 'restarting' ? '重启中...' : '重启服务'}
                 </button>
                 <button
                   onClick={() => handleAction('stop')}
-                  disabled={actionBusy}
+                  disabled={actionBusy || actionDisabled}
                   className="flex items-center gap-2 px-4 py-2 text-sm bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors disabled:opacity-60">
                   <PowerOff className="w-4 h-4" />
                   {serviceAction === 'stopping' ? '停止中...' : '停止服务'}
                 </button>
               </div>
             </div>
+            {actionDisabled && (
+              <p className="text-xs text-slate-500 mt-3">当前环境已禁用服务启停操作</p>
+            )}
           </div>
 
           {/* 操作结果输出 */}
@@ -1188,6 +1272,28 @@ export default function JupyterHubDashboard() {
             <h3 className="text-lg font-semibold text-slate-900">JupyterHub 日志</h3>
             <div className="flex gap-2">
               <select
+                value={logDate}
+                onChange={(e) => setLogDate(e.target.value)}
+                className="px-3 py-2 text-sm border border-slate-300 rounded-lg"
+              >
+                {(logDateOptions.length > 0 ? logDateOptions : [{ key: 'today', label: '今天', iso: '', filename: '' }]).map((opt) => (
+                  <option key={opt.key} value={opt.key}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+              <select
+                value={String(logLineLimit)}
+                onChange={(e) => setLogLineLimit(parseInt(e.target.value, 10) || 300)}
+                className="px-3 py-2 text-sm border border-slate-300 rounded-lg"
+              >
+                <option value="100">100 行</option>
+                <option value="300">300 行</option>
+                <option value="500">500 行</option>
+                <option value="1000">1000 行</option>
+                <option value="2000">2000 行</option>
+              </select>
+              <select
                 value={logLevel}
                 onChange={(e) => setLogLevel(e.target.value as LogLevel)}
                 className="px-3 py-2 text-sm border border-slate-300 rounded-lg"
@@ -1198,7 +1304,7 @@ export default function JupyterHubDashboard() {
                 <option value="ERROR">ERROR</option>
               </select>
               <button
-                onClick={() => fetchLogs(logLevel)}
+                onClick={() => fetchLogs(logLevel, logDate, logLineLimit)}
                 disabled={logsLoading}
                 className="flex items-center gap-2 px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-60"
               >
@@ -1206,7 +1312,7 @@ export default function JupyterHubDashboard() {
                 {logsLoading ? '刷新中...' : '刷新'}
               </button>
               <a
-                href={buildApiUrl(`/api/logcheck?level=${encodeURIComponent(logLevel)}&limit=1000&download=1`)}
+                href={buildApiUrl(`/api/logcheck?level=${encodeURIComponent(logLevel)}&limit=${encodeURIComponent(String(logLineLimit))}&date=${encodeURIComponent(logDate)}&download=1`)}
                 className="flex items-center gap-2 px-4 py-2 text-sm bg-slate-600 text-white rounded-lg hover:bg-slate-700"
               >
                 下载
@@ -1215,7 +1321,7 @@ export default function JupyterHubDashboard() {
           </div>
         </div>
         <div className="p-6">
-          <div className="bg-slate-900 text-slate-100 rounded-lg p-4 font-mono text-sm max-h-96 overflow-y-auto">
+          <div className="bg-slate-900 text-slate-100 rounded-lg p-4 font-mono text-sm max-h-[720px] overflow-y-auto">
             {logsError ? (
               <p className="text-red-400">{logsError}</p>
             ) : logsLoading && logsData.length === 0 ? (
@@ -1242,7 +1348,7 @@ export default function JupyterHubDashboard() {
           </div>
           <div className="mt-4 p-4 bg-slate-50 rounded-lg border border-slate-200">
             <p className="text-xs text-slate-600">
-              <strong>日志文件位置:</strong> {SERVICE_LOG_FILES.jupyterhub}<br />
+              <strong>日志文件位置:</strong> {logsSource ?? SERVICE_LOG_FILES.jupyterhub}<br />
               <strong>日志轮转:</strong> 保留 15 天，配置文件: {SERVICE_LOG_FILES.logrotateConfig}
             </p>
           </div>
@@ -1301,6 +1407,12 @@ export default function JupyterHubDashboard() {
     };
 
     const users = (userStatsData?.users ?? []).slice().sort((a, b) => b.memUsageMiB - a.memUsageMiB);
+    const runningUsers = users.filter((u) => u.status === 'running' && u.node);
+    const nodeOptions = Array.from(new Set(runningUsers.map((u) => u.node))).filter(Boolean) as string[];
+    const visibleUsers =
+      userNodeFilter === 'all'
+        ? runningUsers
+        : runningUsers.filter((u) => u.node === userNodeFilter);
     const usedMemGB = userStatsData?.workerMemUsedGB ?? 0;
     const totalMemGB = userStatsData?.workerMemTotalGB ?? 0;
 
@@ -1369,23 +1481,52 @@ export default function JupyterHubDashboard() {
         {/* 用户列表 */}
         <div className="bg-white rounded-xl shadow-sm border border-slate-200">
           <div className="p-6 border-b border-slate-200">
-            <div className="flex items-center justify-between">
-              <h3 className="text-lg font-semibold text-slate-900">用户列表</h3>
-              <button
-                onClick={doFetchUserStats}
-                disabled={userStatsLoading}
-                className="flex items-center gap-2 px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-60"
-              >
-                <RefreshCw className={`w-4 h-4 ${userStatsLoading ? 'animate-spin' : ''}`} />
-                {userStatsLoading ? '刷新中...' : '刷新'}
-              </button>
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
+              <h3 className="text-lg font-semibold text-slate-900 min-w-0">用户列表</h3>
+              <div className="flex items-center gap-2 shrink-0 flex-wrap">
+                <span className="text-xs font-medium text-slate-500 whitespace-nowrap">节点</span>
+                <Select value={userNodeFilter} onValueChange={setUserNodeFilter}>
+                  <SelectTrigger className="h-9 w-[7.5rem] sm:w-36 rounded-lg border-slate-200 bg-slate-50 text-slate-800 text-sm shadow-sm hover:bg-white focus:ring-2 focus:ring-blue-500/25 data-[placeholder]:text-slate-500 [&_[data-slot=select-value]]:truncate [&_[data-slot=select-value]]:text-left">
+                    <SelectValue placeholder="全部" />
+                  </SelectTrigger>
+                  <SelectContent
+                    position="popper"
+                    sideOffset={6}
+                    className="rounded-xl border border-slate-200 bg-white p-1 shadow-lg min-w-[var(--radix-select-trigger-width)] max-w-[min(20rem,calc(100vw-2rem))]"
+                  >
+                    <SelectItem
+                      value="all"
+                      className="rounded-lg py-2 pl-3 pr-8 text-slate-800 focus:bg-blue-50 focus:text-blue-900 data-[highlighted]:bg-slate-100"
+                    >
+                      全部节点
+                    </SelectItem>
+                    {nodeOptions.map((n) => (
+                      <SelectItem
+                        key={n}
+                        value={n}
+                        className="rounded-lg py-2 pl-3 pr-8 font-mono text-sm text-slate-800 focus:bg-blue-50 focus:text-blue-900 data-[highlighted]:bg-slate-100"
+                      >
+                        {n}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <button
+                  onClick={doFetchUserStats}
+                  disabled={userStatsLoading}
+                  className="flex items-center gap-2 px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-60"
+                >
+                  <RefreshCw className={`w-4 h-4 ${userStatsLoading ? 'animate-spin' : ''}`} />
+                  {userStatsLoading ? '刷新中...' : '刷新'}
+                </button>
+              </div>
             </div>
           </div>
           <div className="p-6">
             {userStatsLoading && !userStatsData ? (
               <div className="text-sm text-slate-400 text-center py-8">加载用户数据中...</div>
-            ) : users.length === 0 ? (
-              <div className="text-sm text-slate-400 text-center py-8">暂无用户数据</div>
+            ) : visibleUsers.length === 0 ? (
+              <div className="text-sm text-slate-400 text-center py-8">暂无该节点运行中用户数据</div>
             ) : (
               <div className="overflow-x-auto">
                 <table className="w-full">
@@ -1402,7 +1543,7 @@ export default function JupyterHubDashboard() {
                     </tr>
                   </thead>
                   <tbody>
-                    {users.map((user) => (
+                    {visibleUsers.map((user) => (
                       <tr key={user.username} className="border-b border-slate-100 hover:bg-slate-50">
                         <td className="py-4 px-4">
                           <div className="flex items-center gap-3">
@@ -1514,7 +1655,7 @@ export default function JupyterHubDashboard() {
         </div>
 
         {/* 内存使用率警告 */}
-        {users.some((u) => u.memLimitMiB > 0 && u.memUsageMiB / u.memLimitMiB >= 0.9) && (
+        {visibleUsers.some((u) => u.memLimitMiB > 0 && u.memUsageMiB / u.memLimitMiB >= 0.9) && (
           <div className="bg-red-50 border border-red-200 rounded-xl p-6">
             <div className="flex items-start gap-3">
               <AlertTriangle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
@@ -1522,7 +1663,7 @@ export default function JupyterHubDashboard() {
                 <h4 className="text-base font-semibold text-red-900 mb-2">内存使用率警告</h4>
                 <p className="text-sm text-red-700">以下用户内存使用率已超过 90%，可能触发 OOM：</p>
                 <ul className="mt-2 space-y-1 text-sm text-red-700">
-                  {users
+                  {visibleUsers
                     .filter((u) => u.memLimitMiB > 0 && u.memUsageMiB / u.memLimitMiB >= 0.9)
                     .map((user) => (
                       <li key={user.username} className="flex items-center gap-2">
@@ -1945,6 +2086,100 @@ export default function JupyterHubDashboard() {
     }
   };
 
+  const handleLogin = async (e: FormEvent) => {
+    e.preventDefault();
+    setLoginLoading(true);
+    setLoginError(null);
+    try {
+      const res = await fetch(buildApiUrl('/api/auth/login'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: loginUsername.trim(), password: loginPassword }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || '登录失败');
+      }
+      setAuthUser({ username: data.username, isAdmin: Boolean(data.isAdmin) });
+      setLoginPassword('');
+    } catch (error) {
+      setLoginError(error instanceof Error ? error.message : '登录失败');
+    } finally {
+      setLoginLoading(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    await fetch(buildApiUrl('/api/auth/logout'), { method: 'POST' }).catch(() => {});
+    setAuthUser(null);
+    setLoginPassword('');
+  };
+
+  if (authChecking) {
+    return (
+      <div className="min-h-screen bg-slate-100 flex items-center justify-center">
+        <div className="text-slate-600">认证检查中...</div>
+      </div>
+    );
+  }
+
+  if (!authUser) {
+    return (
+      <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4">
+        <form onSubmit={handleLogin} className="w-full max-w-md bg-white rounded-xl shadow-sm border border-slate-200 p-6 space-y-4">
+          <h1 className="text-xl font-semibold text-slate-900">JupyterHub Ops 登录</h1>
+          <p className="text-sm text-slate-500">使用公司 LDAP 账号登录</p>
+          <div className="space-y-2">
+            <label className="text-sm text-slate-700">用户名</label>
+            <input
+              value={loginUsername}
+              onChange={(e) => setLoginUsername(e.target.value)}
+              className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm"
+              placeholder="请输入用户名"
+            />
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm text-slate-700">密码</label>
+            <input
+              type="password"
+              value={loginPassword}
+              onChange={(e) => setLoginPassword(e.target.value)}
+              className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm"
+              placeholder="请输入密码"
+            />
+          </div>
+          {loginError && <p className="text-sm text-red-600">{loginError}</p>}
+          <button
+            type="submit"
+            disabled={loginLoading || !loginUsername.trim() || !loginPassword}
+            className="w-full py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-60 text-sm"
+          >
+            {loginLoading ? '登录中...' : '登录'}
+          </button>
+        </form>
+      </div>
+    );
+  }
+
+  if (!authUser.isAdmin) {
+    return (
+      <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4">
+        <div className="w-full max-w-md bg-white rounded-xl shadow-sm border border-slate-200 p-6 space-y-4">
+          <h1 className="text-xl font-semibold text-slate-900">无权限访问</h1>
+          <p className="text-sm text-slate-600">
+            当前账号 <span className="font-medium">{authUser.username}</span> 不是 JupyterHub 管理员，无法访问运维平台。
+          </p>
+          <button
+            onClick={handleLogout}
+            className="w-full py-2 bg-slate-700 text-white rounded-lg hover:bg-slate-800 text-sm"
+          >
+            退出登录
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex min-h-screen bg-slate-100">
       {/* 刷新成功 Toast 提示 */}
@@ -1956,7 +2191,8 @@ export default function JupyterHubDashboard() {
       )}
       {renderSidebar()}
       <div className="flex-1 p-8">
-        <div className="mb-8">
+        <div className="mb-8 flex items-start justify-between gap-4">
+          <div>
           <h1 className="text-2xl font-bold text-slate-900">
             {activeTab === 'dashboard' && '运维仪表盘'}
             {activeTab === 'services' && '服务管理'}
@@ -1970,6 +2206,19 @@ export default function JupyterHubDashboard() {
           <p className="text-sm text-slate-600 mt-1">
             基于 Docker Swarm + NFS 的 JupyterHub 集群运维平台
           </p>
+          </div>
+          <div className="flex items-center gap-3">
+            <div className="text-sm text-slate-600">
+              {authUser.username}
+              {authUser.isAdmin ? ' (管理员)' : ''}
+            </div>
+            <button
+              onClick={handleLogout}
+              className="px-3 py-1.5 text-xs bg-slate-200 text-slate-700 rounded-lg hover:bg-slate-300"
+            >
+              退出登录
+            </button>
+          </div>
         </div>
         {renderContent()}
       </div>

@@ -25,8 +25,11 @@ import {
   SERVICE_MANAGE_SCRIPTS,
   SERVICE_MANAGE_WORKDIR,
 } from '@/config/service';
+import { requireAdmin } from '@/lib/guard';
 
 export async function POST(req: NextRequest) {
+  const auth = requireAdmin();
+  if (auth.error) return auth.error;
   const { action } = await req.json();
 
   const script = SERVICE_MANAGE_SCRIPTS[action as keyof typeof SERVICE_MANAGE_SCRIPTS];
