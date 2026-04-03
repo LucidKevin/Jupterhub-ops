@@ -18,22 +18,29 @@ export interface ClusterNodeConfig {
 export const CLUSTER_NODES_CONFIG: ClusterNodeConfig[] = [
   {
     hostname: 'sz-glbd-jupterhub-123-235',
-    ip: '10.10.28.113',
-    displayName: '主节点 (10.10.28.113)',
+    ip: '10.9.123.235',
+    displayName: '主节点 (10.9.123.235)',
     role: 'manager',
     labels: ['manager', 'nfs-server'],
   },
   {
     hostname: 'sz-glbd-jupterhub-123-228',
-    ip: '10.10.28.115',
-    displayName: '计算节点1 (10.10.28.115)',
+    ip: '10.9.123.228',
+    displayName: '计算节点1 (10.9.123.228)',
     role: 'worker',
     labels: ['worker'],
   },
   {
     hostname: 'sz-glbd-jupterhub-123-229',
-    ip: '10.10.28.119',
-    displayName: '计算节点2 (10.10.28.119)',
+    ip: '10.9.123.229',
+    displayName: '计算节点2 (10.9.123.229)',
+    role: 'worker',
+    labels: ['worker'],
+  },
+  {
+    hostname: 'sz-glbd-jupterhub-123-230',
+    ip: '10.9.123.230',
+    displayName: '计算节点3 (10.9.123.230)',
     role: 'worker',
     labels: ['worker'],
   },
@@ -42,9 +49,9 @@ export const CLUSTER_NODES_CONFIG: ClusterNodeConfig[] = [
 /** JupyterHub API 配置 */
 export const JUPYTERHUB_CONFIG = {
   /** JupyterHub 用户列表 API 地址（manager 节点） */
-  apiUrl: 'http://10.10.28.113:8002/jupyterhub/hub/api/users',
+  apiUrl: 'http://10.9.123.235:8002/jupyterhub/hub/api/users',
   /** API 访问 Token */
-  token: 'f816342615af4e8da326d8873d5eda1f',
+  token: '5b1682dcfca4461eb666851a8148bcb6',
 };
 
 /** Node Exporter 默认端口 */

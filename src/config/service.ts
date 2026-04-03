@@ -33,3 +33,39 @@ export const API_TIMEOUT_MS = {
 } as const;
 
 export const SSH_PORT = 39000;
+
+/**
+ * Swarm stack 名（与 `docker stack deploy <name>` 一致）。
+ * 用户 notebook 服务全名多为 `${SWARM_STACK_NAME}_jupyter-用户名`；不设则按短名 `jupyter-xxx` 请求。
+ * 仅在服务端 API 中读取（勿依赖客户端 bundle）。
+ */
+export const SWARM_STACK_NAME = (process.env.JUPYTERHUB_OPS_SWARM_STACK ?? '').trim();
+
+/** 用户 Swarm 服务日志（docker service logs）：浏览分页与搜索边界 */
+export const USER_SERVICE_LOGS = {
+  /** 首次 / 每页 tail 行数 */
+  tailDefault: 150,
+  /**
+   * 向上翻页需要额外“冗余”行数来抵消 docker service logs 的缺陷：
+   * - 它没有上界（--until）能力，只能 --since 下界
+   * - 因此在 until 边界附近，可能有大量更“新”的日志挤掉更“早”的日志
+   * 增大 tailMax 能显著提升向上分页命中率。
+   */
+  tailMax: 2000,
+  execTimeoutMs: 45_000,
+  /** 搜索：仅检索最近 N 小时内的日志（全量可检索范围，UI 需同步说明） */
+  searchSinceHours: 168,
+  /** 搜索单次拉取 stdout 上限，防止占满内存 */
+  searchMaxBytes: 8 * 1024 * 1024,
+  /** 前端「加载更早」最多请求次数，避免无限翻页压垮 manager */
+  browseMaxOlderRequests: 60,
+
+  /**
+   * 由于你们的 Docker 版本不支持 `docker service logs --until`，
+   * 向上翻页会在服务端用 `--since` 拉取一个“边界前”时间窗口，
+   * 然后在 Node 里按行首时间戳过滤 `<= until` 的日志。
+   *
+   * 该窗口越大，越容易包含足够多的更早日志，但输出也可能更大。
+   */
+  browseUntilLookbackHours: 24,
+} as const;

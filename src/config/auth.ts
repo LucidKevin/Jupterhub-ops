@@ -2,7 +2,7 @@ export const AUTH_COOKIE_NAME = 'jupyterhub_ops_session';
 export const AUTH_SESSION_TTL_SECONDS = 60 * 60 * 8; // 8 hours
 
 export const LDAP_CONFIG = {
-  serverAddress: 'ad.fql.com',
+  serverAddress: '10.9.128.250',
   serverPort: 389,
   bindDnTemplates: [
     'CN={username},OU=平台研发组,OU=大数据中心,OU=T线,OU=乐信,DC=lexinfintech,DC=com',

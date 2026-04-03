@@ -26,35 +26,47 @@ async function verifyLdapCredentials(username: string, password: string): Promis
 }
 
 async function getJupyterAdminFlag(username: string): Promise<boolean> {
-  const usersApiBase = JUPYTERHUB_CONFIG.apiUrl.replace(/\/users$/, '');
-  const res = await fetch(`${usersApiBase}/users/${encodeURIComponent(username)}`, {
-    headers: { Authorization: `token ${JUPYTERHUB_CONFIG.token}` },
-    cache: 'no-store',
-  });
-  if (!res.ok) return false;
-  const user = (await res.json()) as { admin?: boolean };
-  return Boolean(user.admin);
+  try {
+    const usersApiBase = JUPYTERHUB_CONFIG.apiUrl.replace(/\/users$/, '');
+    const res = await fetch(`${usersApiBase}/users/${encodeURIComponent(username)}`, {
+      headers: { Authorization: `token ${JUPYTERHUB_CONFIG.token}` },
+      cache: 'no-store',
+    });
+    if (!res.ok) return false;
+    const user = (await res.json()) as { admin?: boolean };
+    return Boolean(user.admin);
+  } catch {
+    // JupyterHub 不可达/超时等情况：直接当作非管理员，让登录流程返回可解析的 JSON。
+    return false;
+  }
 }
 
 export async function POST(req: NextRequest) {
-  const body = await req.json().catch(() => null);
-  if (!body) return NextResponse.json({ error: '请求体格式错误' }, { status: 400 });
+  try {
+    const body = await req.json().catch(() => null);
+    if (!body) return NextResponse.json({ error: '请求体格式错误' }, { status: 400 });
 
-  const username = String(body.username || '').trim();
-  const password = String(body.password || '');
-  if (!username || !password) {
-    return NextResponse.json({ error: '用户名和密码不能为空' }, { status: 400 });
+    const username = String(body.username || '').trim();
+    const password = String(body.password || '');
+    if (!username || !password) {
+      return NextResponse.json({ error: '用户名和密码不能为空' }, { status: 400 });
+    }
+
+    const ldapOk = await verifyLdapCredentials(username, password);
+    if (!ldapOk) {
+      return NextResponse.json({ error: '用户名或密码错误' }, { status: 401 });
+    }
+
+    const isAdmin = await getJupyterAdminFlag(username);
+    const token = createSessionToken(username, isAdmin);
+    const res = NextResponse.json({ success: true, username, isAdmin });
+    setSessionCookie(res, token);
+    return res;
+  } catch (e) {
+    return NextResponse.json(
+      { error: '登录失败', detail: e instanceof Error ? e.message : String(e) },
+      { status: 500 }
+    );
   }
-
-  const ldapOk = await verifyLdapCredentials(username, password);
-  if (!ldapOk) {
-    return NextResponse.json({ error: '用户名或密码错误' }, { status: 401 });
-  }
-
-  const isAdmin = await getJupyterAdminFlag(username);
-  const token = createSessionToken(username, isAdmin);
-  const res = NextResponse.json({ success: true, username, isAdmin });
-  setSessionCookie(res, token);
-  return res;
 }
 

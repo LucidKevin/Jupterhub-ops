@@ -21,6 +21,29 @@ function detectLogLevel(line: string): LogEntry['level'] {
   return 'INFO';
 }
 
+/** 新一条 JupyterHub 日志行以 [I/W/E 开头；续行（缩进 dict 等）归入上一条，避免按级别过滤时只剩半句 */
+const JUPYTER_LOG_LINE_START = /^\[\s*[IWE]\b/;
+
+function groupLinesIntoRecords(lines: string[]): string[] {
+  const records: string[] = [];
+  let buf: string[] = [];
+  for (const line of lines) {
+    const isStart = JUPYTER_LOG_LINE_START.test(line);
+    if (isStart && buf.length > 0) {
+      records.push(buf.join('\n'));
+      buf = [line];
+    } else if (isStart && buf.length === 0) {
+      buf = [line];
+    } else if (buf.length === 0) {
+      buf = [line];
+    } else {
+      buf.push(line);
+    }
+  }
+  if (buf.length > 0) records.push(buf.join('\n'));
+  return records;
+}
+
 export async function GET(req: NextRequest) {
   const auth = requireAdmin();
   if (auth.error) return auth.error;
@@ -29,10 +52,17 @@ export async function GET(req: NextRequest) {
   const limit = Number(search.get('limit') || 200);
   const download = search.get('download') === '1';
   const date = search.get('date') || 'today';
+  const qRaw = (search.get('q') || '').trim();
+  const q = qRaw.length > 200 ? qRaw.slice(0, 200) : qRaw;
+  const qLower = q ? q.toLowerCase() : '';
 
   const allowedLevels: LogLevel[] = ['all', 'INFO', 'WARNING', 'ERROR'];
   const safeLevel = allowedLevels.includes(level) ? level : 'all';
   const safeLimit = Number.isFinite(limit) ? Math.min(Math.max(limit, 1), 2000) : 200;
+  /** 有关键词时在整文件内匹配；为避免超大 JSON，命中条数超过此值时只返回文件末尾一段并标记截断 */
+  const MAX_SEARCH_RESULTS = 10000;
+  /** 带关键词下载时可包含更多条（仍防单响应过大） */
+  const MAX_DOWNLOAD_SEARCH_RESULTS = 50000;
 
   try {
     let filePath: string;
@@ -56,14 +86,37 @@ export async function GET(req: NextRequest) {
       .map((line) => line.trimEnd())
       .filter(Boolean);
 
-    const filtered = lines.filter((line) =>
-      safeLevel === 'all' ? true : detectLogLevel(line) === safeLevel
-    );
+    const records = groupLinesIntoRecords(lines);
 
-    const sliced = filtered.slice(Math.max(filtered.length - safeLimit, 0));
+    const filtered = records.filter((rec) => {
+      if (safeLevel !== 'all') {
+        const first = rec.split('\n')[0] ?? rec;
+        if (detectLogLevel(first) !== safeLevel) return false;
+      }
+      if (qLower && !rec.toLowerCase().includes(qLower)) return false;
+      return true;
+    });
+
+    let sliced: string[];
+    let searchTruncated = false;
+    if (qLower) {
+      if (filtered.length <= MAX_SEARCH_RESULTS) {
+        sliced = filtered;
+      } else {
+        sliced = filtered.slice(filtered.length - MAX_SEARCH_RESULTS);
+        searchTruncated = true;
+      }
+    } else {
+      sliced = filtered.slice(Math.max(filtered.length - safeLimit, 0));
+    }
 
     if (download) {
-      return new NextResponse(sliced.join('\n'), {
+      const downloadRecords = qLower
+        ? filtered.length <= MAX_DOWNLOAD_SEARCH_RESULTS
+          ? filtered
+          : filtered.slice(filtered.length - MAX_DOWNLOAD_SEARCH_RESULTS)
+        : sliced;
+      return new NextResponse(downloadRecords.join('\n\n'), {
         headers: {
           'Content-Type': 'text/plain; charset=utf-8',
           'Content-Disposition': `attachment; filename="jupyterhub-${safeLevel.toLowerCase()}-logs.txt"`,
@@ -71,10 +124,13 @@ export async function GET(req: NextRequest) {
       });
     }
 
-    const entries: LogEntry[] = sliced.map((line) => ({
-      line,
-      level: detectLogLevel(line),
-    }));
+    const entries: LogEntry[] = sliced.map((rec) => {
+      const first = rec.split('\n')[0] ?? rec;
+      return {
+        line: rec,
+        level: detectLogLevel(first),
+      };
+    });
 
     return NextResponse.json({
       total: filtered.length,
@@ -82,6 +138,14 @@ export async function GET(req: NextRequest) {
       date,
       source: resolved,
       entries,
+      ...(qLower
+        ? {
+            searchFullFile: true,
+            searchMatchTotal: filtered.length,
+            searchTruncated,
+            searchResultCap: MAX_SEARCH_RESULTS,
+          }
+        : {}),
     });
   } catch (error) {
     return NextResponse.json(

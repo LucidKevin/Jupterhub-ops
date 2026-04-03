@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback, type FormEvent } from 'react';
+import { useState, useEffect, useCallback, useRef, type FormEvent, type ReactNode } from 'react';
 import {
   LayoutDashboard,
   Server,
@@ -23,7 +23,8 @@ import {
   Cpu,
   MemoryStick,
   Database,
-  Wifi
+  Wifi,
+  Search,
 } from 'lucide-react';
 import {
   CLEANUP_THRESHOLD_OPTIONS,
@@ -46,6 +47,16 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import {
+  Sheet,
+  SheetContent,
+  SheetHeader,
+  SheetTitle,
+  SheetDescription,
+} from '@/components/ui/sheet';
+import { USER_SERVICE_LOGS } from '@/config/service';
+import { swarmServiceNameFromContainerName } from '@/lib/swarm-service-name';
+import { sortLogLinesAscending } from '@/lib/docker-log-line-utils';
 
 type TabType = 'dashboard' | 'services' | 'nodes' | 'nfs' | 'resources' | 'logs' | 'operations' | 'users';
 
@@ -113,6 +124,38 @@ interface LogDateOption {
 interface AuthUser {
   username: string;
   isAdmin: boolean;
+}
+
+/** 用户 Swarm 服务日志行级别（与 logcheck 规则一致，支持 task 前缀 + `| [I/W/E ...]`） */
+function detectUserServiceLogLineLevel(line: string): 'INFO' | 'WARNING' | 'ERROR' {
+  const upperLine = line.toUpperCase();
+  if (/\[\s*E\b/.test(upperLine)) return 'ERROR';
+  if (/\[\s*W\b/.test(upperLine)) return 'WARNING';
+  if (/\bERROR\b|\bERR\b|\[ERROR\]/.test(upperLine)) return 'ERROR';
+  if (/\bWARNING\b|\bWARN\b|\[WARNING\]|\[WARN\]/.test(upperLine)) return 'WARNING';
+  return 'INFO';
+}
+
+function highlightLogLine(line: string, q: string): ReactNode {
+  const qq = q.trim().toLowerCase();
+  if (!qq) return line;
+  const lower = line.toLowerCase();
+  const parts: ReactNode[] = [];
+  let start = 0;
+  let i = lower.indexOf(qq, start);
+  let key = 0;
+  while (i >= 0) {
+    parts.push(line.slice(start, i));
+    parts.push(
+      <mark key={`m${key++}`} className="rounded-sm bg-yellow-200 px-0.5">
+        {line.slice(i, i + qq.length)}
+      </mark>
+    );
+    start = i + qq.length;
+    i = lower.indexOf(qq, start);
+  }
+  parts.push(line.slice(start));
+  return parts.length === 1 ? parts[0] : <>{parts}</>;
 }
 
 function buildApiUrl(path: string): string {
@@ -296,15 +339,56 @@ export default function JupyterHubDashboard() {
   const [userStatsLoading, setUserStatsLoading] = useState(false);
   const [userNodeFilter, setUserNodeFilter] = useState<'all' | string>('all');
 
+  const userLogScrollRef = useRef<HTMLDivElement>(null);
+  const userLogInitialScrollDone = useRef(false);
+
+  const [userLogSheetOpen, setUserLogSheetOpen] = useState(false);
+  const [userLogTarget, setUserLogTarget] = useState<{
+    username: string;
+    service: string;
+    containerName: string;
+  } | null>(null);
+  const [userLogBrowseLines, setUserLogBrowseLines] = useState<string[]>([]);
+  const [userLogHasMoreOlder, setUserLogHasMoreOlder] = useState(false);
+  const [userLogNextOlderUntil, setUserLogNextOlderUntil] = useState<string | null>(null);
+  const [userLogBrowseLoading, setUserLogBrowseLoading] = useState(false);
+  const [userLogBrowseLoadingOlder, setUserLogBrowseLoadingOlder] = useState(false);
+  const [userLogBrowseError, setUserLogBrowseError] = useState<string | null>(null);
+  /** 仅「向上加载更早」失败时使用，避免首屏已有日志仍显示全局 docker 失败 */
+  const [userLogOlderError, setUserLogOlderError] = useState<string | null>(null);
+  const [userLogSheetLevel, setUserLogSheetLevel] = useState<LogLevel>('all');
+  const [userLogResolvedService, setUserLogResolvedService] = useState<string | null>(null);
+  const [userLogBrowseDiagnostics, setUserLogBrowseDiagnostics] = useState<string | null>(null);
+  const [userLogOlderRequests, setUserLogOlderRequests] = useState(0);
+  const [userLogEndOfHistory, setUserLogEndOfHistory] = useState(false);
+
+  const [userLogSearchInput, setUserLogSearchInput] = useState('');
+  const [userLogSearchDebounced, setUserLogSearchDebounced] = useState('');
+  const [userLogSearchMatches, setUserLogSearchMatches] = useState<string[] | null>(null);
+  const [userLogSearchLoading, setUserLogSearchLoading] = useState(false);
+  const [userLogSearchError, setUserLogSearchError] = useState<string | null>(null);
+  const [userLogSearchMeta, setUserLogSearchMeta] = useState<{
+    truncated: boolean;
+    scanned: number;
+    matchCount: number;
+  } | null>(null);
+
   // 日志查看
   const [logLevel, setLogLevel] = useState<LogLevel>('all');
   const [logDateOptions, setLogDateOptions] = useState<LogDateOption[]>([]);
   const [logDate, setLogDate] = useState<'today' | string>('today');
   const [logLineLimit, setLogLineLimit] = useState<number>(300);
+  const [hubLogSearchInput, setHubLogSearchInput] = useState('');
+  const [hubLogSearchQ, setHubLogSearchQ] = useState('');
   const [logsData, setLogsData] = useState<LogEntry[]>([]);
   const [logsLoading, setLogsLoading] = useState(false);
   const [logsError, setLogsError] = useState<string | null>(null);
   const [logsSource, setLogsSource] = useState<string | null>(null);
+  const [hubLogSearchMeta, setHubLogSearchMeta] = useState<{
+    matchTotal: number;
+    truncated: boolean;
+    cap: number;
+  } | null>(null);
 
   // 切换到用户管理 tab 时懒加载用户数据（避免在 render 阶段 setState）
   useEffect(() => {
@@ -333,12 +417,18 @@ export default function JupyterHubDashboard() {
     }
   }, [logDate]);
 
-  const fetchLogs = useCallback(async (level: LogLevel, dateKey: string, limitLines: number) => {
+  useEffect(() => {
+    const t = setTimeout(() => setHubLogSearchQ(hubLogSearchInput.trim()), 400);
+    return () => clearTimeout(t);
+  }, [hubLogSearchInput]);
+
+  const fetchLogs = useCallback(async (level: LogLevel, dateKey: string, limitLines: number, searchQ: string) => {
     setLogsLoading(true);
     setLogsError(null);
     try {
       const safeLimit = Number.isFinite(limitLines) ? Math.min(Math.max(limitLines, 1), 2000) : 300;
       const query = new URLSearchParams({ level, limit: String(safeLimit), date: dateKey });
+      if (searchQ) query.set('q', searchQ);
       const res = await fetch(buildApiUrl(`/api/logcheck?${query.toString()}`), {
         cache: 'no-store',
       });
@@ -348,10 +438,20 @@ export default function JupyterHubDashboard() {
       }
       setLogsData(Array.isArray(data.entries) ? data.entries : []);
       setLogsSource(typeof data.source === 'string' ? data.source : null);
+      if (searchQ && typeof data.searchMatchTotal === 'number') {
+        setHubLogSearchMeta({
+          matchTotal: data.searchMatchTotal,
+          truncated: Boolean(data.searchTruncated),
+          cap: typeof data.searchResultCap === 'number' ? data.searchResultCap : 10000,
+        });
+      } else {
+        setHubLogSearchMeta(null);
+      }
     } catch (error) {
       setLogsError(error instanceof Error ? error.message : '日志加载失败');
       setLogsData([]);
       setLogsSource(null);
+      setHubLogSearchMeta(null);
     } finally {
       setLogsLoading(false);
     }
@@ -360,8 +460,8 @@ export default function JupyterHubDashboard() {
   useEffect(() => {
     if (activeTab !== 'logs') return;
     fetchLogDates();
-    fetchLogs(logLevel, logDate, logLineLimit);
-  }, [activeTab, logLevel, logDate, logLineLimit, fetchLogDates, fetchLogs]);
+    fetchLogs(logLevel, logDate, logLineLimit, hubLogSearchQ);
+  }, [activeTab, logLevel, logDate, logLineLimit, hubLogSearchQ, fetchLogDates, fetchLogs]);
 
   // 闲置用户清理
   const [cleanupThreshold, setCleanupThreshold] = useState<CleanupThreshold>(DEFAULT_CLEANUP_THRESHOLD);
@@ -371,6 +471,181 @@ export default function JupyterHubDashboard() {
   const [cleanupConfirming, setCleanupConfirming] = useState(false);
   // 正在执行启动/停止操作的用户名（null 表示无）
   const [userActionLoading, setUserActionLoading] = useState<string | null>(null);
+
+  useEffect(() => {
+    const t = setTimeout(() => setUserLogSearchDebounced(userLogSearchInput.trim()), 350);
+    return () => clearTimeout(t);
+  }, [userLogSearchInput]);
+
+  const fetchUserLogBrowsePage = useCallback(
+    async (service: string, opts: { until: string | null }) => {
+      const params = new URLSearchParams({
+        service,
+        tail: String(USER_SERVICE_LOGS.tailDefault),
+      });
+      if (opts.until) params.set('until', opts.until);
+      const res = await fetch(buildApiUrl(`/api/users/service-logs?${params}`));
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || data.detail || '加载失败');
+      return {
+        lines: data.lines ?? [],
+        hasMoreOlder: Boolean(data.hasMoreOlder),
+        nextOlderUntil: data.nextOlderUntil ?? null,
+        resolvedService: typeof data.resolvedService === 'string' ? data.resolvedService : null,
+        stderrHint: typeof data.stderrHint === 'string' ? data.stderrHint : undefined,
+      };
+    },
+    []
+  );
+
+  const openUserServiceLogSheet = useCallback(
+    (user: UserEntry) => {
+      const service = swarmServiceNameFromContainerName(user.containerName);
+      if (!service || user.containerName == null) return;
+      userLogInitialScrollDone.current = false;
+      setUserLogTarget({ username: user.username, service, containerName: user.containerName });
+      setUserLogSearchInput('');
+      setUserLogSearchDebounced('');
+      setUserLogSearchMatches(null);
+      setUserLogSearchMeta(null);
+      setUserLogSearchError(null);
+      setUserLogOlderRequests(0);
+      setUserLogBrowseError(null);
+      setUserLogOlderError(null);
+      setUserLogEndOfHistory(false);
+      setUserLogSheetLevel('all');
+      setUserLogBrowseDiagnostics(null);
+      setUserLogResolvedService(null);
+      setUserLogBrowseLines([]);
+      setUserLogHasMoreOlder(false);
+      setUserLogNextOlderUntil(null);
+      setUserLogSheetOpen(true);
+      setUserLogBrowseLoading(true);
+      fetchUserLogBrowsePage(service, { until: null })
+        .then((r) => {
+          setUserLogBrowseError(null);
+          setUserLogBrowseLines(sortLogLinesAscending(r.lines));
+          setUserLogHasMoreOlder(r.hasMoreOlder);
+          setUserLogNextOlderUntil(r.nextOlderUntil);
+          setUserLogResolvedService(r.resolvedService ?? service);
+          setUserLogBrowseDiagnostics(
+            r.lines.length === 0 && r.stderrHint ? r.stderrHint : null
+          );
+        })
+        .catch((e) => {
+          setUserLogBrowseError(e instanceof Error ? e.message : '加载失败');
+        })
+        .finally(() => setUserLogBrowseLoading(false));
+    },
+    [fetchUserLogBrowsePage]
+  );
+
+  const loadUserLogOlder = useCallback(async () => {
+    if (!userLogTarget || !userLogNextOlderUntil || userLogBrowseLoadingOlder || !userLogHasMoreOlder)
+      return;
+    if (userLogOlderRequests >= USER_SERVICE_LOGS.browseMaxOlderRequests) return;
+
+    const el = userLogScrollRef.current;
+    const prevScrollHeight = el?.scrollHeight ?? 0;
+    const prevScrollTop = el?.scrollTop ?? 0;
+
+    setUserLogBrowseLoadingOlder(true);
+    setUserLogOlderError(null);
+    try {
+      const r = await fetchUserLogBrowsePage(userLogTarget.service, {
+        until: userLogNextOlderUntil,
+      });
+      if (r.lines.length === 0) {
+        setUserLogEndOfHistory(true);
+        setUserLogHasMoreOlder(false);
+        setUserLogNextOlderUntil(null);
+        return;
+      }
+      setUserLogEndOfHistory(false);
+      setUserLogBrowseLines((prev) =>
+        sortLogLinesAscending(Array.from(new Set([...r.lines, ...prev])))
+      );
+      setUserLogHasMoreOlder(r.hasMoreOlder);
+      setUserLogNextOlderUntil(r.nextOlderUntil);
+      setUserLogOlderRequests((n) => n + 1);
+      requestAnimationFrame(() => {
+        const e = userLogScrollRef.current;
+        if (e) e.scrollTop = e.scrollHeight - prevScrollHeight + prevScrollTop;
+      });
+    } catch (e) {
+      setUserLogOlderError(e instanceof Error ? e.message : '加载更早日志失败');
+    } finally {
+      setUserLogBrowseLoadingOlder(false);
+    }
+  }, [
+    userLogTarget,
+    userLogNextOlderUntil,
+    userLogBrowseLoadingOlder,
+    userLogHasMoreOlder,
+    userLogOlderRequests,
+    fetchUserLogBrowsePage,
+  ]);
+
+  const handleUserLogScroll = useCallback(() => {
+    const el = userLogScrollRef.current;
+    if (!el || userLogSearchDebounced) return;
+    if (el.scrollTop > 56) return;
+    void loadUserLogOlder();
+  }, [userLogSearchDebounced, loadUserLogOlder]);
+
+  useEffect(() => {
+    if (!userLogSheetOpen || !userLogTarget) return;
+    const q = userLogSearchDebounced;
+    if (!q) {
+      setUserLogSearchMatches(null);
+      setUserLogSearchMeta(null);
+      setUserLogSearchError(null);
+      setUserLogSearchLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setUserLogSearchLoading(true);
+    setUserLogSearchError(null);
+    const params = new URLSearchParams({
+      service: userLogTarget.service,
+      q,
+    });
+    fetch(buildApiUrl(`/api/users/service-logs/search?${params}`))
+      .then((r) => r.json())
+      .then((data) => {
+        if (cancelled) return;
+        if (data.error) throw new Error(data.error);
+        setUserLogSearchMatches(data.matches ?? []);
+        setUserLogSearchMeta({
+          truncated: Boolean(data.truncated),
+          scanned: data.scannedLineCount ?? 0,
+          matchCount: data.matchCount ?? 0,
+        });
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setUserLogSearchError(e instanceof Error ? e.message : '搜索失败');
+        setUserLogSearchMatches(null);
+        setUserLogSearchMeta(null);
+      })
+      .finally(() => {
+        if (!cancelled) setUserLogSearchLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [userLogSheetOpen, userLogTarget, userLogSearchDebounced]);
+
+  useEffect(() => {
+    if (!userLogSheetOpen || userLogSearchDebounced) return;
+    if (userLogBrowseLoading || userLogBrowseLines.length === 0) return;
+    if (userLogInitialScrollDone.current) return;
+    const el = userLogScrollRef.current;
+    if (el) {
+      el.scrollTop = el.scrollHeight;
+      userLogInitialScrollDone.current = true;
+    }
+  }, [userLogSheetOpen, userLogSearchDebounced, userLogBrowseLoading, userLogBrowseLines]);
 
   // 根据实际节点内存数据动态生成 OOM 告警（内存使用率 >= 85% 时触发）
   const oomAlerts = nodes
@@ -1282,10 +1557,20 @@ export default function JupyterHubDashboard() {
                   </option>
                 ))}
               </select>
+              <input
+                type="search"
+                value={hubLogSearchInput}
+                onChange={(e) => setHubLogSearchInput(e.target.value)}
+                placeholder="搜索关键词"
+                className="min-w-[140px] flex-1 max-w-xs px-3 py-2 text-sm border border-slate-300 rounded-lg"
+                aria-label="JupyterHub 日志搜索"
+              />
               <select
                 value={String(logLineLimit)}
                 onChange={(e) => setLogLineLimit(parseInt(e.target.value, 10) || 300)}
-                className="px-3 py-2 text-sm border border-slate-300 rounded-lg"
+                disabled={Boolean(hubLogSearchQ)}
+                title={hubLogSearchQ ? '有搜索词时按整文件匹配，不再用条数截取' : undefined}
+                className="px-3 py-2 text-sm border border-slate-300 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <option value="100">100 行</option>
                 <option value="300">300 行</option>
@@ -1304,7 +1589,7 @@ export default function JupyterHubDashboard() {
                 <option value="ERROR">ERROR</option>
               </select>
               <button
-                onClick={() => fetchLogs(logLevel, logDate, logLineLimit)}
+                onClick={() => fetchLogs(logLevel, logDate, logLineLimit, hubLogSearchQ)}
                 disabled={logsLoading}
                 className="flex items-center gap-2 px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-60"
               >
@@ -1312,13 +1597,26 @@ export default function JupyterHubDashboard() {
                 {logsLoading ? '刷新中...' : '刷新'}
               </button>
               <a
-                href={buildApiUrl(`/api/logcheck?level=${encodeURIComponent(logLevel)}&limit=${encodeURIComponent(String(logLineLimit))}&date=${encodeURIComponent(logDate)}&download=1`)}
+                href={buildApiUrl(
+                  `/api/logcheck?level=${encodeURIComponent(logLevel)}&limit=${encodeURIComponent(String(logLineLimit))}&date=${encodeURIComponent(logDate)}${hubLogSearchQ ? `&q=${encodeURIComponent(hubLogSearchQ)}` : ''}&download=1`
+                )}
                 className="flex items-center gap-2 px-4 py-2 text-sm bg-slate-600 text-white rounded-lg hover:bg-slate-700"
               >
                 下载
               </a>
             </div>
           </div>
+          {hubLogSearchQ && hubLogSearchMeta ? (
+            <div className="px-6 pb-2 text-xs text-slate-600">
+              已在当前日志文件中全文匹配 <strong>{hubLogSearchMeta.matchTotal}</strong> 条
+              {hubLogSearchMeta.truncated ? (
+                <span className="text-amber-700">
+                  {' '}
+                  （页面最多展示末尾 {hubLogSearchMeta.cap} 条；下载最多 5 万条）
+                </span>
+              ) : null}
+            </div>
+          ) : null}
         </div>
         <div className="p-6">
           <div className="bg-slate-900 text-slate-100 rounded-lg p-4 font-mono text-sm max-h-[720px] overflow-y-auto">
@@ -1338,7 +1636,7 @@ export default function JupyterHubDashboard() {
                         ? 'text-yellow-400'
                         : 'text-blue-400';
                   return (
-                    <p key={`${idx}-${entry.line}`} className={levelClass}>
+                    <p key={`${idx}-${entry.line.slice(0, 80)}`} className={`${levelClass} whitespace-pre-wrap break-words`}>
                       {entry.line}
                     </p>
                   );
@@ -1415,8 +1713,10 @@ export default function JupyterHubDashboard() {
         : runningUsers.filter((u) => u.node === userNodeFilter);
     const usedMemGB = userStatsData?.workerMemUsedGB ?? 0;
     const totalMemGB = userStatsData?.workerMemTotalGB ?? 0;
+    const userLogSearchDays = Math.max(1, Math.round(USER_SERVICE_LOGS.searchSinceHours / 24));
 
     return (
+      <>
       <div className="space-y-6">
         {/* 用户统计卡片 */}
         <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
@@ -1607,43 +1907,59 @@ export default function JupyterHubDashboard() {
                             : '—'}
                         </td>
                         <td className="py-4 px-4">
-                          {user.status === 'running' ? (
-                            <button
-                              onClick={async () => {
-                                setUserActionLoading(user.username);
-                                await fetch(buildApiUrl('/api/users/server'), {
-                                  method: 'POST',
-                                  headers: { 'Content-Type': 'application/json' },
-                                  body: JSON.stringify({ action: 'stop', username: user.username }),
-                                });
-                                setUserActionLoading(null);
-                                doFetchUserStats();
-                              }}
-                              disabled={userActionLoading === user.username}
-                              className="flex items-center gap-1 px-3 py-1.5 text-xs bg-red-100 text-red-700 rounded-lg hover:bg-red-200 transition-colors disabled:opacity-60"
-                            >
-                              <PowerOff className="w-3 h-3" />
-                              {userActionLoading === user.username ? '停止中…' : '停止'}
-                            </button>
-                          ) : (
-                            <button
-                              onClick={async () => {
-                                setUserActionLoading(user.username);
-                                await fetch(buildApiUrl('/api/users/server'), {
-                                  method: 'POST',
-                                  headers: { 'Content-Type': 'application/json' },
-                                  body: JSON.stringify({ action: 'start', username: user.username }),
-                                });
-                                setUserActionLoading(null);
-                                doFetchUserStats();
-                              }}
-                              disabled={userActionLoading === user.username}
-                              className="flex items-center gap-1 px-3 py-1.5 text-xs bg-green-100 text-green-700 rounded-lg hover:bg-green-200 transition-colors disabled:opacity-60"
-                            >
-                              <Power className="w-3 h-3" />
-                              {userActionLoading === user.username ? '启动中…' : '启动'}
-                            </button>
-                          )}
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            {user.status === 'running' &&
+                              user.containerName &&
+                              swarmServiceNameFromContainerName(user.containerName) && (
+                                <button
+                                  type="button"
+                                  onClick={() => openUserServiceLogSheet(user)}
+                                  className="flex items-center gap-1 px-3 py-1.5 text-xs bg-slate-100 text-slate-700 rounded-lg hover:bg-slate-200 transition-colors"
+                                >
+                                  <FileText className="w-3 h-3" />
+                                  日志
+                                </button>
+                              )}
+                            {user.status === 'running' ? (
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  setUserActionLoading(user.username);
+                                  await fetch(buildApiUrl('/api/users/server'), {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ action: 'stop', username: user.username }),
+                                  });
+                                  setUserActionLoading(null);
+                                  doFetchUserStats();
+                                }}
+                                disabled={userActionLoading === user.username}
+                                className="flex items-center gap-1 px-3 py-1.5 text-xs bg-red-100 text-red-700 rounded-lg hover:bg-red-200 transition-colors disabled:opacity-60"
+                              >
+                                <PowerOff className="w-3 h-3" />
+                                {userActionLoading === user.username ? '停止中…' : '停止'}
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  setUserActionLoading(user.username);
+                                  await fetch(buildApiUrl('/api/users/server'), {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ action: 'start', username: user.username }),
+                                  });
+                                  setUserActionLoading(null);
+                                  doFetchUserStats();
+                                }}
+                                disabled={userActionLoading === user.username}
+                                className="flex items-center gap-1 px-3 py-1.5 text-xs bg-green-100 text-green-700 rounded-lg hover:bg-green-200 transition-colors disabled:opacity-60"
+                              >
+                                <Power className="w-3 h-3" />
+                                {userActionLoading === user.username ? '启动中…' : '启动'}
+                              </button>
+                            )}
+                          </div>
                         </td>
                       </tr>
                     ))}
@@ -1850,6 +2166,204 @@ export default function JupyterHubDashboard() {
           </div>
         </div>
       </div>
+
+      <Sheet
+        open={userLogSheetOpen}
+        onOpenChange={(open) => {
+          setUserLogSheetOpen(open);
+          if (!open) {
+            setUserLogTarget(null);
+            setUserLogEndOfHistory(false);
+            setUserLogOlderError(null);
+            userLogInitialScrollDone.current = false;
+          }
+        }}
+      >
+        <SheetContent
+          side="right"
+          className="flex h-full w-full flex-col gap-0 border-slate-200 p-0 sm:max-w-[min(42rem,100vw)]"
+        >
+          <SheetHeader className="shrink-0 space-y-2 border-b border-slate-200 p-4 text-left">
+            <SheetTitle className="text-slate-900">
+              用户服务日志{userLogTarget ? ` · ${userLogTarget.username}` : ''}
+            </SheetTitle>
+            <SheetDescription asChild>
+              <div className="text-xs text-slate-500">
+                支持关键词搜索与级别筛选；滚动到顶部会自动加载更早日志。
+              </div>
+            </SheetDescription>
+            <div className="relative pt-1">
+              <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400" />
+              <input
+                type="search"
+                value={userLogSearchInput}
+                onChange={(e) => setUserLogSearchInput(e.target.value)}
+                placeholder="搜索关键词（服务端全量检索）…"
+                className="w-full rounded-lg border border-slate-200 bg-slate-50 py-2 pl-9 pr-3 text-sm text-slate-800 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-500/20"
+              />
+            </div>
+            <div className="flex flex-wrap items-center gap-2 pt-1">
+              <span className="text-xs font-medium text-slate-500">级别</span>
+              <Select
+                value={userLogSheetLevel}
+                onValueChange={(v) => setUserLogSheetLevel(v as LogLevel)}
+              >
+                <SelectTrigger className="h-9 w-40 rounded-lg border-slate-200 bg-white px-3 shadow-sm text-sm">
+                  <SelectValue placeholder="选择级别" />
+                </SelectTrigger>
+                <SelectContent className="rounded-xl border border-slate-200 bg-white p-1 shadow-lg">
+                  <SelectItem value="all">所有日志</SelectItem>
+                  <SelectItem value="INFO">INFO</SelectItem>
+                  <SelectItem value="WARNING">WARNING</SelectItem>
+                  <SelectItem value="ERROR">ERROR</SelectItem>
+                </SelectContent>
+              </Select>
+              <span className="text-[11px] text-slate-400">与「日志查看」页规则一致，按行内 [I]/[W]/[E] 等筛选</span>
+            </div>
+          </SheetHeader>
+
+          <div className="min-h-0 flex-1 flex flex-col bg-slate-50">
+            {userLogSearchDebounced ? (
+              <div className="flex min-h-0 flex-1 flex-col p-3">
+                {userLogSearchLoading && (
+                  <p className="text-sm text-slate-500 py-4 text-center">搜索中…</p>
+                )}
+                {userLogSearchError && (
+                  <p className="text-sm text-red-600 py-2 px-1">{userLogSearchError}</p>
+                )}
+                {!userLogSearchLoading && userLogSearchMatches && (
+                  <>
+                    {userLogSearchMeta && (
+                      <p className="text-xs text-slate-500 mb-2 px-1">
+                        命中 {userLogSearchMeta.matchCount} 行（扫描 {userLogSearchMeta.scanned} 行）
+                        {userLogSearchMeta.truncated ? '；输出已截断，可能未搜全' : ''}
+                      </p>
+                    )}
+                    <div className="max-h-[70vh] min-h-[200px] flex-1 overflow-auto rounded-lg border border-slate-200 bg-slate-900 p-3">
+                      {userLogSearchMatches.length === 0 ? (
+                        <p className="text-sm text-slate-400">无匹配行</p>
+                      ) : (() => {
+                        const filteredSearch =
+                          userLogSheetLevel === 'all'
+                            ? userLogSearchMatches
+                            : userLogSearchMatches.filter(
+                                (ln) => detectUserServiceLogLineLevel(ln) === userLogSheetLevel
+                              );
+                        if (filteredSearch.length === 0) {
+                          return (
+                            <p className="text-sm text-slate-400">
+                              当前级别下无行（可改回「所有日志」）
+                            </p>
+                          );
+                        }
+                        return (
+                          <div className="space-y-1 font-mono text-[11px] leading-relaxed break-all">
+                            {filteredSearch.map((line, idx) => {
+                              const lv = detectUserServiceLogLineLevel(line);
+                              const levelClass =
+                                lv === 'ERROR'
+                                  ? 'text-red-400'
+                                  : lv === 'WARNING'
+                                    ? 'text-yellow-400'
+                                    : 'text-blue-400';
+                              return (
+                                <p key={`${idx}-${line.slice(0, 40)}`} className={levelClass}>
+                                  {highlightLogLine(line, userLogSearchDebounced)}
+                                </p>
+                              );
+                            })}
+                          </div>
+                        );
+                      })()}
+                    </div>
+                  </>
+                )}
+              </div>
+            ) : (
+              <div className="flex min-h-0 flex-1 flex-col p-3">
+                {userLogBrowseLoading && (
+                  <p className="text-sm text-slate-500 py-4 text-center">加载日志…</p>
+                )}
+                {userLogBrowseError && userLogBrowseLines.length === 0 && (
+                  <p className="text-sm text-red-600 py-2 px-1">{userLogBrowseError}</p>
+                )}
+                {!userLogBrowseLoading && (
+                  <>
+                    {(userLogBrowseLoadingOlder || userLogHasMoreOlder || userLogOlderError || userLogEndOfHistory) && (
+                      <div className="mb-2 flex flex-col items-center gap-1 text-xs text-slate-500">
+                        <div className="flex flex-wrap items-center justify-center gap-2">
+                          {userLogBrowseLoadingOlder ? (
+                            <span>正在加载更早…</span>
+                          ) : userLogHasMoreOlder ? (
+                            <span>滚到顶部加载更早</span>
+                          ) : userLogEndOfHistory ? (
+                            <span className="text-slate-400">已到最早日志</span>
+                          ) : null}
+                          {userLogOlderRequests >= USER_SERVICE_LOGS.browseMaxOlderRequests && (
+                            <span className="text-amber-700">已达单次浏览加载上限</span>
+                          )}
+                        </div>
+                        {userLogOlderError && (
+                          <p className="text-center text-red-600 text-xs px-2">{userLogOlderError}</p>
+                        )}
+                      </div>
+                    )}
+                    <div
+                      ref={userLogScrollRef}
+                      onScroll={handleUserLogScroll}
+                      className="max-h-[70vh] min-h-[240px] flex-1 overflow-auto rounded-lg border border-slate-200 bg-slate-900 p-3"
+                    >
+                      {userLogBrowseLines.length === 0 ? (
+                        <div className="space-y-2 text-sm text-slate-500">
+                          <p>暂无日志</p>
+                          {userLogBrowseDiagnostics && (
+                            <p className="rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900 font-mono break-all">
+                              {userLogBrowseDiagnostics}
+                            </p>
+                          )}
+                        </div>
+                      ) : (() => {
+                        const filteredBrowse =
+                          userLogSheetLevel === 'all'
+                            ? userLogBrowseLines
+                            : userLogBrowseLines.filter(
+                                (ln) => detectUserServiceLogLineLevel(ln) === userLogSheetLevel
+                              );
+                        if (filteredBrowse.length === 0) {
+                          return (
+                            <p className="text-sm text-slate-400">
+                              当前级别下无行（可改回「所有日志」）
+                            </p>
+                          );
+                        }
+                        return (
+                          <div className="space-y-1 font-mono text-[11px] leading-relaxed break-all">
+                            {filteredBrowse.map((line, idx) => {
+                              const lv = detectUserServiceLogLineLevel(line);
+                              const levelClass =
+                                lv === 'ERROR'
+                                  ? 'text-red-400'
+                                  : lv === 'WARNING'
+                                    ? 'text-yellow-400'
+                                    : 'text-blue-400';
+                              return (
+                                <p key={`${idx}-${line.slice(0, 48)}`} className={levelClass}>
+                                  {line}
+                                </p>
+                              );
+                            })}
+                          </div>
+                        );
+                      })()}
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+        </SheetContent>
+      </Sheet>
+    </>
     );
   };
 
