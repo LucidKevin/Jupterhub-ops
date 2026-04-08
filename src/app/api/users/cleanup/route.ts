@@ -29,6 +29,7 @@ import { JUPYTERHUB_CONFIG } from '@/config/cluster';
 import { CLEANUP_THRESHOLD_OPTIONS } from '@/config/dashboard';
 import { API_TIMEOUT_MS } from '@/config/service';
 import { requireAdmin } from '@/lib/guard';
+import { fetchJupyterHubUsers } from '@/lib/jupyterhub-client';
 
 const ALLOWED_THRESHOLDS = CLEANUP_THRESHOLD_OPTIONS;
 type ThresholdDays = typeof ALLOWED_THRESHOLDS[number];
@@ -66,22 +67,16 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // 获取 JupyterHub 用户列表
   let users: JupyterUser[] = [];
-  try {
-    const res = await fetch(JUPYTERHUB_CONFIG.apiUrl, {
-      headers: { Authorization: `token ${JUPYTERHUB_CONFIG.token}` },
-      cache: 'no-store',
-      signal: AbortSignal.timeout(API_TIMEOUT_MS.cleanupAction),
-    });
-    const data = await res.json();
-    if (!Array.isArray(data)) {
-      return NextResponse.json({ error: '获取用户列表失败，JupyterHub 返回非数组响应' }, { status: 502 });
-    }
-    users = data;
-  } catch {
-    return NextResponse.json({ error: '无法连接 JupyterHub API' }, { status: 502 });
+  const hubList = await fetchJupyterHubUsers({
+    apiUrl: JUPYTERHUB_CONFIG.apiUrl,
+    token: JUPYTERHUB_CONFIG.token,
+    timeoutMs: API_TIMEOUT_MS.cleanupAction,
+  });
+  if (!hubList.ok) {
+    return NextResponse.json({ error: `无法连接 JupyterHub API：${hubList.error}` }, { status: 502 });
   }
+  users = hubList.users as JupyterUser[];
 
   // 筛选：正在运行 + last_activity 已知 + 空闲天数 >= 阈值
   const affected = users

@@ -23,3 +23,11 @@ next-env.d.ts
 
 # pnpm
 .pnpm-store/
+
+# 采集脚本 esbuild 产物（部署时在目标机 pnpm run build:collect-metrics）
+scripts/collect-metrics.cjs
+
+# 本地指标 SQLite（由采集脚本生成）
+data/*.db
+data/*.db-shm
+data/*.db-wal

@@ -44,6 +44,8 @@ import { promisify } from 'util';
 import { CLUSTER_NODES_CONFIG, JUPYTERHUB_CONFIG, NODE_EXPORTER_PORT } from '@/config/cluster';
 import { API_TIMEOUT_MS, SSH_PORT } from '@/config/service';
 import { requireAdmin } from '@/lib/guard';
+import { fetchJupyterHubUsers } from '@/lib/jupyterhub-client';
+import { tryFetchNodeExporterMetrics } from '@/lib/prometheus-node-metrics';
 
 const execAsync = promisify(exec);
 
@@ -117,25 +119,12 @@ async function fetchWorkerContainerStats(ip: string): Promise<
  * 超时 5 秒，失败时返回 { totalGB: 0, usedGB: 0 }。
  */
 async function fetchWorkerMemoryGB(ip: string): Promise<{ totalGB: number; usedGB: number }> {
-  try {
-    const res = await fetch(`http://${ip}:${NODE_EXPORTER_PORT}/metrics`, {
-      cache: 'no-store',
-      signal: AbortSignal.timeout(API_TIMEOUT_MS.nodeMetrics),
-    });
-    const text = await res.text();
-    let memTotal = 0, memAvail = 0;
-    for (const line of text.split('\n')) {
-      if (line.startsWith('node_memory_MemTotal_bytes ')) {
-        memTotal = parseFloat(line.split(' ')[1]);
-      } else if (line.startsWith('node_memory_MemAvailable_bytes ')) {
-        memAvail = parseFloat(line.split(' ')[1]);
-      }
-    }
-    const GB = 1024 ** 3;
-    return { totalGB: memTotal / GB, usedGB: (memTotal - memAvail) / GB };
-  } catch {
-    return { totalGB: 0, usedGB: 0 };
-  }
+  const { metrics } = await tryFetchNodeExporterMetrics(ip, NODE_EXPORTER_PORT, API_TIMEOUT_MS.nodeMetrics);
+  if (!metrics) return { totalGB: 0, usedGB: 0 };
+  const memTotal = metrics.get('node_memory_MemTotal_bytes')?.[0]?.value ?? 0;
+  const memAvail = metrics.get('node_memory_MemAvailable_bytes')?.[0]?.value ?? 0;
+  const GB = 1024 ** 3;
+  return { totalGB: memTotal / GB, usedGB: (memTotal - memAvail) / GB };
 }
 
 export async function GET() {
@@ -145,10 +134,14 @@ export async function GET() {
 
   // 并发请求：JupyterHub 用户列表 + 各 worker 节点的容器统计和内存数据
   const [jupyterResult, ...workerResults] = await Promise.allSettled([
-    fetch(JUPYTERHUB_CONFIG.apiUrl, {
-      headers: { Authorization: `token ${JUPYTERHUB_CONFIG.token}` },
-      cache: 'no-store',
-    }).then((r) => r.json() as Promise<JupyterUser[]>),
+    fetchJupyterHubUsers({
+      apiUrl: JUPYTERHUB_CONFIG.apiUrl,
+      token: JUPYTERHUB_CONFIG.token,
+      timeoutMs: API_TIMEOUT_MS.userServerAction,
+    }).then((r) => {
+      if (!r.ok) throw new Error(r.error);
+      return r.users as JupyterUser[];
+    }),
     ...workerNodes.map(async (node) => ({
       ip: node.ip,
       stats: await fetchWorkerContainerStats(node.ip),

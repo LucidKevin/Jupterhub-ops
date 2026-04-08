@@ -18,7 +18,9 @@
  */
 import { NextResponse } from 'next/server';
 import { JUPYTERHUB_CONFIG } from '@/config/cluster';
+import { API_TIMEOUT_MS } from '@/config/service';
 import { requireAdmin } from '@/lib/guard';
+import { fetchJupyterHubUsers } from '@/lib/jupyterhub-client';
 
 /** JupyterHub GET /hub/api/users 返回的用户对象（仅使用到的字段） */
 interface JupyterUser {
@@ -32,20 +34,15 @@ export async function GET() {
   const auth = requireAdmin();
   if (auth.error) return auth.error;
   try {
-    const response = await fetch(JUPYTERHUB_CONFIG.apiUrl, {
-      headers: {
-        // JupyterHub API Token 鉴权
-        Authorization: `token ${JUPYTERHUB_CONFIG.token}`,
-      },
-      // 禁用缓存，每次都拿最新数据
-      cache: 'no-store',
+    const hub = await fetchJupyterHubUsers({
+      apiUrl: JUPYTERHUB_CONFIG.apiUrl,
+      token: JUPYTERHUB_CONFIG.token,
+      timeoutMs: API_TIMEOUT_MS.userServerAction,
     });
-
-    if (!response.ok) {
-      throw new Error(`JupyterHub API error: ${response.status}`);
+    if (!hub.ok) {
+      throw new Error(hub.error);
     }
-
-    const users: JupyterUser[] = await response.json();
+    const users: JupyterUser[] = hub.users;
 
     // servers 对象非空 → 至少有一个容器正在运行
     const runningContainers = users.filter(

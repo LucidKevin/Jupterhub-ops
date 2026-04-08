@@ -54,9 +54,18 @@ import {
   SheetTitle,
   SheetDescription,
 } from '@/components/ui/sheet';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import { USER_SERVICE_LOGS } from '@/config/service';
 import { swarmServiceNameFromContainerName } from '@/lib/swarm-service-name';
 import { sortLogLinesAscending } from '@/lib/docker-log-line-utils';
+import { MetricsTrendSheet } from '@/components/metrics-trend-sheet';
 
 type TabType = 'dashboard' | 'services' | 'nodes' | 'nfs' | 'resources' | 'logs' | 'operations' | 'users';
 
@@ -92,6 +101,17 @@ interface UserStatsData {
   workerMemTotalGB: number;
   workerMemUsedGB: number;
   users: UserEntry[];
+}
+
+/** 用户容器内存（接口为 MiB）在界面统一用 GB 展示（1 GB = 1024 MiB） */
+function formatUserMemoryGb(usageMiB: number, limitMiB: number): string {
+  const u = usageMiB / 1024;
+  const l = limitMiB / 1024;
+  return `${u.toFixed(1)} / ${l.toFixed(1)} GB`;
+}
+
+function formatOneDecimal(n: number): string {
+  return n.toFixed(1);
 }
 
 interface CleanupPreviewUser {
@@ -307,7 +327,7 @@ export default function JupyterHubDashboard() {
     };
   }, []);
 
-  // 页面加载后立即拉取，并每 30 秒自动刷新一次
+  // 页面加载后立即拉取，并按 DASHBOARD_REFRESH_INTERVAL_MS 自动刷新
   useEffect(() => {
     if (!authUser) return;
     fetchDashboardData();
@@ -332,12 +352,18 @@ export default function JupyterHubDashboard() {
   const [serviceConfigLoading, setServiceConfigLoading] = useState(false);
   const [serviceAction, setServiceAction] = useState<'idle' | 'starting' | 'stopping' | 'restarting'>('idle');
   const [serviceResult, setServiceResult] = useState<{ success: boolean; output: string; error?: string } | null>(null);
-  const [activeConfigTab, setActiveConfigTab] = useState<'compose' | 'hubConfig'>('compose');
+  const [activeConfigTab, setActiveConfigTab] = useState<'compose' | 'hubConfig'>('hubConfig');
+  const [orgDialogOpen, setOrgDialogOpen] = useState(false);
+  const [orgChain, setOrgChain] = useState<string[]>(['乐信']);
+  const [orgSaveLoading, setOrgSaveLoading] = useState(false);
+  const [orgSaveError, setOrgSaveError] = useState<string | null>(null);
+  const [newlyInsertedDn, setNewlyInsertedDn] = useState<string | null>(null);
 
   // 用户管理实时数据
   const [userStatsData, setUserStatsData] = useState<UserStatsData | null>(null);
   const [userStatsLoading, setUserStatsLoading] = useState(false);
   const [userNodeFilter, setUserNodeFilter] = useState<'all' | string>('all');
+  const userStatsFetchInFlightRef = useRef(false);
 
   const userLogScrollRef = useRef<HTMLDivElement>(null);
   const userLogInitialScrollDone = useRef(false);
@@ -390,16 +416,50 @@ export default function JupyterHubDashboard() {
     cap: number;
   } | null>(null);
 
+  /** 节点 / 用户资源趋势（SQLite 历史） */
+  const [metricsTrend, setMetricsTrend] = useState<{
+    mode: 'node' | 'user';
+    nodeIp?: string;
+    username?: string;
+  } | null>(null);
+
+  const fetchUserStats = useCallback(async () => {
+    if (userStatsFetchInFlightRef.current) return;
+    userStatsFetchInFlightRef.current = true;
+    setUserStatsLoading(true);
+    try {
+      const res = await fetch(buildApiUrl('/api/dashboard/user-stats'), { cache: 'no-store' });
+      const data = (await res.json()) as UserStatsData;
+      setUserStatsData(data);
+    } catch {
+      setUserStatsData((prev) =>
+        prev ?? {
+          totalUsers: 0,
+          runningUsers: 0,
+          stoppedUsers: 0,
+          workerMemTotalGB: 0,
+          workerMemUsedGB: 0,
+          users: [],
+        }
+      );
+    } finally {
+      setUserStatsLoading(false);
+      userStatsFetchInFlightRef.current = false;
+    }
+  }, []);
+
   // 切换到用户管理 tab 时懒加载用户数据（避免在 render 阶段 setState）
   useEffect(() => {
     if (activeTab !== 'users' || userStatsData || userStatsLoading) return;
-    setUserStatsLoading(true);
-    fetch(buildApiUrl('/api/dashboard/user-stats'))
-      .then((r) => r.json())
-      .then((data: UserStatsData) => setUserStatsData(data))
-      .catch(() => setUserStatsData({ totalUsers: 0, runningUsers: 0, stoppedUsers: 0, workerMemTotalGB: 0, workerMemUsedGB: 0, users: [] }))
-      .finally(() => setUserStatsLoading(false));
-  }, [activeTab, userStatsData, userStatsLoading]);
+    void fetchUserStats();
+  }, [activeTab, userStatsData, userStatsLoading, fetchUserStats]);
+
+  // 停留在用户管理时定时刷新列表与统计（与仪表盘轮询周期一致）
+  useEffect(() => {
+    if (activeTab !== 'users') return;
+    const id = setInterval(() => void fetchUserStats(), DASHBOARD_REFRESH_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, [activeTab, fetchUserStats]);
 
   const fetchLogDates = useCallback(async () => {
     try {
@@ -849,7 +909,11 @@ export default function JupyterHubDashboard() {
             <div>
               <p className="text-sm font-medium text-slate-600">平均 CPU 使用率</p>
               <p className="text-3xl font-bold text-slate-900 mt-2">
-                {metricsLoading && avgCpu === null ? '…' : `${avgCpu ?? (nodes.length > 0 ? Math.round(nodes.reduce((acc, n) => acc + n.cpu, 0) / nodes.length) : 0)}%`}
+                {metricsLoading && avgCpu === null
+                  ? '…'
+                  : `${formatOneDecimal(
+                      avgCpu ?? (nodes.length > 0 ? nodes.reduce((acc, n) => acc + n.cpu, 0) / nodes.length : 0)
+                    )}%`}
               </p>
               {(avgCpu ?? 0) >= 80 && (
                 <p className="text-xs text-yellow-500 mt-1">⚠️ 部分节点负载较高</p>
@@ -866,7 +930,11 @@ export default function JupyterHubDashboard() {
             <div>
               <p className="text-sm font-medium text-slate-600">平均内存使用率</p>
               <p className="text-3xl font-bold text-slate-900 mt-2">
-                {metricsLoading && avgMemory === null ? '…' : `${avgMemory ?? (nodes.length > 0 ? Math.round(nodes.reduce((acc, n) => acc + n.memory, 0) / nodes.length) : 0)}%`}
+                {metricsLoading && avgMemory === null
+                  ? '…'
+                  : `${formatOneDecimal(
+                      avgMemory ?? (nodes.length > 0 ? nodes.reduce((acc, n) => acc + n.memory, 0) / nodes.length : 0)
+                    )}%`}
               </p>
               {(avgMemory ?? 0) >= 85 && (
                 <p className="text-xs text-red-500 mt-1">🔥 接近 OOM 阈值</p>
@@ -957,7 +1025,7 @@ export default function JupyterHubDashboard() {
                     <div className="flex justify-between text-sm mb-1">
                       <span className="text-slate-600">CPU</span>
                       <span className={`font-medium ${node.cpu >= 80 ? 'text-red-600' : 'text-slate-900'}`}>
-                        {node.cpu}%
+                        {formatOneDecimal(node.cpu)}%
                       </span>
                     </div>
                     <div className="w-full bg-slate-200 rounded-full h-2">
@@ -971,7 +1039,7 @@ export default function JupyterHubDashboard() {
                     <div className="flex justify-between text-sm mb-1">
                       <span className="text-slate-600">内存</span>
                       <span className={`font-medium ${node.memory >= 80 ? 'text-red-600' : 'text-slate-900'}`}>
-                        {node.memory}%
+                        {formatOneDecimal(node.memory)}%
                       </span>
                     </div>
                     <div className="w-full bg-slate-200 rounded-full h-2">
@@ -984,7 +1052,7 @@ export default function JupyterHubDashboard() {
                   <div>
                     <div className="flex justify-between text-sm mb-1">
                       <span className="text-slate-600">磁盘</span>
-                      <span className="font-medium text-slate-900">{node.disk}%</span>
+                      <span className="font-medium text-slate-900">{formatOneDecimal(node.disk)}%</span>
                     </div>
                     <div className="w-full bg-slate-200 rounded-full h-2">
                       <div
@@ -1002,6 +1070,14 @@ export default function JupyterHubDashboard() {
                     </span>
                   ))}
                 </div>
+                <button
+                  type="button"
+                  onClick={() => setMetricsTrend({ mode: 'node', nodeIp: node.ip })}
+                  className="mt-3 inline-flex items-center gap-1.5 text-xs font-medium text-blue-600 hover:text-blue-800"
+                >
+                  <Activity className="w-3.5 h-3.5" />
+                  资源趋势
+                </button>
               </div>
             ))}
           </div>
@@ -1041,7 +1117,204 @@ export default function JupyterHubDashboard() {
     };
 
     const actionBusy = serviceAction !== 'idle';
-    const actionDisabled = true;
+    const isActionDisabled = (action: 'start' | 'stop' | 'restart') =>
+      actionBusy || action !== 'restart';
+    const NEW_ORG_MARKER = '# [JHOPS-NEW-ORG]';
+    const addOrgLevel = () => setOrgChain((prev) => [...prev, '']);
+    const removeOrgLevel = (idx: number) => {
+      setOrgChain((prev) => {
+        if (idx < 1) return prev; // 第一级「乐信」固定不删
+        return prev.filter((_, i) => i !== idx);
+      });
+    };
+    const setOrgLevel = (idx: number, value: string) => {
+      setOrgChain((prev) => prev.map((v, i) => (i === idx ? value : v)));
+    };
+    const dnFromChain = (chain: string[]) =>
+      chain
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .reverse()
+        .map((s) => `OU=${s}`)
+        .join(',');
+    const extractDcSuffix = (hubContent: string) => {
+      // 先从现有 DN 模板列表里提取 DC 后缀，避免正则误截断导致丢失 DC=lexinfintech
+      const existing = parseExistingDnTemplates(hubContent);
+      const pick =
+        existing.find((s) => s.includes(',DC=lexinfintech,DC=com')) ??
+        existing.find((s) => /,DC=[^,]+,DC=[^,]+/i.test(s)) ??
+        existing[0];
+      if (pick) {
+        const idx = pick.indexOf(',DC=');
+        if (idx >= 0) {
+          const suffix = pick.slice(idx);
+          if (suffix.includes(',DC=')) return suffix;
+        }
+      }
+      return ',DC=lexinfintech,DC=com';
+    };
+    const dnTemplateFromChain = (chain: string[], hubContent: string) => {
+      const ouParts = chain
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .reverse()
+        .map((s) => `OU=${s}`);
+
+      const dcSuffix = extractDcSuffix(hubContent).replace(/^\s*,\s*/, '');
+      const dcParts = dcSuffix
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+
+      // 统一用 join(',') 生成，避免多/少逗号
+      const dn = ['CN={username}', ...ouParts, ...dcParts].join(',');
+      // 兜底：避免 DC 后缀异常导致只剩 DC=com
+      if (!/DC=lexinfintech/i.test(dn) || !/DC=com/i.test(dn)) {
+        return ['CN={username}', ...ouParts, 'DC=lexinfintech', 'DC=com'].join(',');
+      }
+      return dn;
+    };
+
+    const normalizeDnTemplateList = (hubContent: string) => {
+      const range = findDnTemplateListRange(hubContent);
+      if (!range) return hubContent;
+      const lines = hubContent.split('\n');
+      for (let i = range.start; i <= range.end; i++) {
+        const t = lines[i] ?? '';
+        if (!/['"]CN=\{username\},/.test(t)) continue;
+        // 下一行仍是字符串条目时，本行必须以逗号结尾
+        const next = lines[i + 1] ?? '';
+        const nextIsEntry = /['"]CN=\{username\},/.test(next);
+        const nextIsBracket = next.trim().startsWith(']');
+        if (nextIsEntry && !t.trimEnd().endsWith(',')) {
+          lines[i] = `${t.trimEnd()},`;
+        }
+        // 最后一条建议也加逗号（保持一致，避免编辑时粘行）
+        if (nextIsBracket && !t.trimEnd().endsWith(',')) {
+          lines[i] = `${t.trimEnd()},`;
+        }
+      }
+      return lines.join('\n');
+    };
+    const findDnTemplateListRange = (hubContent: string) => {
+      const lines = hubContent.split('\n');
+      const dnLineIndexes = lines
+        .map((l, i) => ({ l, i }))
+        .filter(({ l }) => /['"]CN=\{username\},/.test(l))
+        .map(({ i }) => i);
+      if (dnLineIndexes.length === 0) return null as null | { start: number; end: number; entryIndent: string };
+      const firstIdx = dnLineIndexes[0]!;
+      let start = firstIdx;
+      for (let i = firstIdx; i >= 0; i--) {
+        if (lines[i]!.includes('[')) {
+          start = i;
+          break;
+        }
+      }
+      let end = firstIdx;
+      for (let i = firstIdx; i < lines.length; i++) {
+        if (lines[i]!.trim() === ']' || lines[i]!.includes(']')) {
+          end = i;
+          break;
+        }
+      }
+      const entryIndent = lines[firstIdx]!.match(/^(\s*)/)?.[1] ?? '';
+      return { start, end, entryIndent };
+    };
+    const parseExistingDnTemplates = (hubContent: string | null | undefined) => {
+      if (!hubContent) return [] as string[];
+      const range = findDnTemplateListRange(hubContent);
+      if (!range) return [] as string[];
+      const lines = hubContent.split('\n').slice(range.start, range.end + 1);
+      return lines
+        .map((l) => l.trim())
+        .filter((l) => /['"]CN=\{username\},/.test(l))
+        .map((l) => l.replace(/,$/, ''))
+        .map((l) => l.replace(/^["']|["']$/g, ''));
+    };
+    const saveHubConfig = async (nextHubConfig: string) => {
+      const res = await fetch(buildApiUrl('/api/servicemanage/config'), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ hubConfig: nextHubConfig }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || '保存 jupyterhub_config.py 失败');
+      }
+      setServiceConfig((prev) => (prev ? { ...prev, hubConfig: nextHubConfig } : prev));
+      setServiceResult({ success: true, output: '已更新 jupyterhub_config.py' });
+    };
+    const existingDnTemplates = parseExistingDnTemplates(serviceConfig?.hubConfig);
+    const handleAddOrganization = async () => {
+      const hubContent = serviceConfig?.hubConfig;
+      if (!hubContent) {
+        setOrgSaveError('当前未加载 jupyterhub_config.py，无法新增组织');
+        return;
+      }
+      const dnTemplate = dnTemplateFromChain(orgChain, hubContent);
+      if (!dnTemplate || !/OU=/.test(dnTemplate)) {
+        setOrgSaveError('组织路径不能为空');
+        return;
+      }
+      if (hubContent.includes(dnTemplate)) {
+        setOrgSaveError('该组织已存在，无需重复添加');
+        return;
+      }
+      const range = findDnTemplateListRange(hubContent);
+      if (!range) {
+        setOrgSaveError('未在配置中找到 CN={username} 的 OU 列表位置，请检查 jupyterhub_config.py');
+        return;
+      }
+      setOrgSaveError(null);
+      setOrgSaveLoading(true);
+      try {
+        const lines = hubContent.split('\n');
+        const entryLine = `${range.entryIndent}"${dnTemplate}",`;
+        lines.splice(range.end, 0, entryLine);
+        const nextHubConfig = normalizeDnTemplateList(lines.join('\n'));
+        await saveHubConfig(nextHubConfig);
+        setNewlyInsertedDn(dnTemplate);
+        setOrgDialogOpen(false);
+      } catch (e) {
+        setOrgSaveError(e instanceof Error ? e.message : '保存失败');
+      } finally {
+        setOrgSaveLoading(false);
+      }
+    };
+    const handleDeleteOrganization = async (dnTemplate: string) => {
+      const hubContent = serviceConfig?.hubConfig;
+      if (!hubContent) {
+        setOrgSaveError('当前未加载 jupyterhub_config.py，无法删除组织');
+        return;
+      }
+      setOrgSaveError(null);
+      setOrgSaveLoading(true);
+      try {
+        const range = findDnTemplateListRange(hubContent);
+        if (!range) {
+          setOrgSaveError('未在配置中找到 CN={username} 的 OU 列表位置，请检查 jupyterhub_config.py');
+          return;
+        }
+        const lines = hubContent.split('\n');
+        const start = range.start;
+        const end = range.end;
+        const block = lines.slice(start, end + 1);
+        const filtered = block.filter((l) => !l.includes(dnTemplate));
+        if (filtered.length === block.length) {
+          setOrgSaveError('未找到对应组织，可能已被删除');
+          return;
+        }
+        const nextLines = [...lines.slice(0, start), ...filtered, ...lines.slice(end + 1)];
+        const nextHubConfig = normalizeDnTemplateList(nextLines.join('\n'));
+        await saveHubConfig(nextHubConfig);
+        if (newlyInsertedDn === dnTemplate) setNewlyInsertedDn(null);
+      } catch (e) {
+        setOrgSaveError(e instanceof Error ? e.message : '删除失败');
+      } finally {
+        setOrgSaveLoading(false);
+      }
+    };
     const configContent = activeConfigTab === 'compose' ? serviceConfig?.compose : serviceConfig?.hubConfig;
     const configLabel = activeConfigTab === 'compose' ? 'docker-compose.yml' : 'jupyterhub_config.py';
     const configPath = activeConfigTab === 'compose'
@@ -1058,30 +1331,28 @@ export default function JupyterHubDashboard() {
               <div className="flex gap-2">
                 <button
                   onClick={() => handleAction('start')}
-                  disabled={actionBusy || actionDisabled}
+                  disabled={isActionDisabled('start')}
                   className="flex items-center gap-2 px-4 py-2 text-sm bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors disabled:opacity-60">
                   <Power className="w-4 h-4" />
                   {serviceAction === 'starting' ? '启动中...' : '启动服务'}
                 </button>
                 <button
                   onClick={() => handleAction('restart')}
-                  disabled={actionBusy || actionDisabled}
+                  disabled={isActionDisabled('restart')}
                   className="flex items-center gap-2 px-4 py-2 text-sm bg-yellow-600 text-white rounded-lg hover:bg-yellow-700 transition-colors disabled:opacity-60">
                   <RefreshCw className={`w-4 h-4 ${serviceAction === 'restarting' ? 'animate-spin' : ''}`} />
                   {serviceAction === 'restarting' ? '重启中...' : '重启服务'}
                 </button>
                 <button
                   onClick={() => handleAction('stop')}
-                  disabled={actionBusy || actionDisabled}
+                  disabled={isActionDisabled('stop')}
                   className="flex items-center gap-2 px-4 py-2 text-sm bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors disabled:opacity-60">
                   <PowerOff className="w-4 h-4" />
                   {serviceAction === 'stopping' ? '停止中...' : '停止服务'}
                 </button>
               </div>
             </div>
-            {actionDisabled && (
-              <p className="text-xs text-slate-500 mt-3">当前环境已禁用服务启停操作</p>
-            )}
+            <p className="text-xs text-slate-500 mt-3">当前仅开放「重启服务」，启动/停止默认禁用。</p>
           </div>
 
           {/* 操作结果输出 */}
@@ -1128,15 +1399,53 @@ export default function JupyterHubDashboard() {
                 </button>
               </div>
             </div>
+            {activeConfigTab === 'hubConfig' && (
+              <div className="mt-3 flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOrgSaveError(null);
+                    setOrgDialogOpen(true);
+                  }}
+                  className="px-3 py-1.5 text-xs font-medium rounded-lg border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100 transition-colors"
+                >
+                  新增组织
+                </button>
+                <p className="text-xs text-slate-500">
+                  按 OU=消金风险策略部,OU=R线,OU=乐信 的结构追加，新增项会高亮。
+                </p>
+              </div>
+            )}
             <p className="text-xs text-slate-400 mt-2">{configPath}</p>
           </div>
           <div className="p-6">
             {serviceConfigLoading ? (
               <div className="text-sm text-slate-400 text-center py-8">加载配置文件中...</div>
             ) : configContent ? (
-              <pre className="text-xs font-mono bg-slate-900 text-slate-100 rounded-lg p-4 overflow-auto max-h-[480px] whitespace-pre">
-                {configContent}
-              </pre>
+              activeConfigTab === 'hubConfig' ? (
+                <pre className="text-xs font-mono bg-slate-900 text-slate-100 rounded-lg p-4 overflow-auto max-h-[480px] whitespace-pre">
+                  {configContent.split('\n').map((line, idx, arr) => {
+                    const isNewOrg =
+                      line.includes(NEW_ORG_MARKER) || (newlyInsertedDn ? line.includes(newlyInsertedDn) : false);
+                    return (
+                      <span
+                        key={`${idx}-${line}`}
+                        className={
+                          isNewOrg
+                            ? 'block bg-amber-300/30 text-amber-100 rounded px-1 -mx-1 border-l-2 border-amber-300'
+                            : 'block'
+                        }
+                      >
+                        {line || ' '}
+                      </span>
+                    );
+                  })}
+                </pre>
+              ) : (
+                <pre className="text-xs font-mono bg-slate-900 text-slate-100 rounded-lg p-4 overflow-auto max-h-[480px] whitespace-pre">
+                  {configContent}
+                </pre>
+              )
             ) : (
               <div className="text-sm text-red-500 text-center py-8">
                 无法读取 {configLabel}，请确认文件路径是否正确
@@ -1144,6 +1453,102 @@ export default function JupyterHubDashboard() {
             )}
           </div>
         </div>
+
+        <Dialog open={orgDialogOpen} onOpenChange={setOrgDialogOpen}>
+          <DialogContent className="sm:max-w-xl max-h-[85vh] overflow-hidden">
+            <DialogHeader>
+              <DialogTitle>新增组织</DialogTitle>
+              <DialogDescription>
+                组织路径按“乐信 → R线 → 消金风险策略部 → ...”展示，写入时会转换为 LDAP OU 顺序。
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-3 overflow-y-auto pr-1 max-h-[60vh]">
+                  {orgChain.map((level, idx) => (
+                <div key={idx} className="flex items-center gap-2">
+                  <span className="w-16 text-xs text-slate-500">第 {idx + 1} 级</span>
+                  <input
+                    value={level}
+                    onChange={(e) => setOrgLevel(idx, e.target.value)}
+                        disabled={idx < 1}
+                    className={`flex-1 rounded-md border px-3 py-2 text-sm ${
+                          idx < 1 ? 'bg-slate-100 text-slate-500 border-slate-200' : 'border-slate-300'
+                    }`}
+                    placeholder="组织名称"
+                  />
+                      {idx >= 1 && (
+                    <button
+                      type="button"
+                      onClick={() => removeOrgLevel(idx)}
+                      className="px-2 py-1 text-xs rounded border border-red-200 text-red-600 hover:bg-red-50"
+                    >
+                      删除
+                    </button>
+                  )}
+                </div>
+              ))}
+              <button
+                type="button"
+                onClick={addOrgLevel}
+                className="px-3 py-1.5 text-xs rounded border border-slate-300 text-slate-700 hover:bg-slate-50"
+              >
+                + 新增层级
+              </button>
+              <div className="rounded-md border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
+                <p className="mb-1 font-medium text-slate-700">将写入（OU）</p>
+                <code className="break-all">
+                  {serviceConfig?.hubConfig ? dnTemplateFromChain(orgChain, serviceConfig.hubConfig) : '-'}
+                </code>
+              </div>
+              <div className="rounded-md border border-slate-200 p-3">
+                <p className="mb-2 text-xs font-medium text-slate-700">已新增组织（可删除）</p>
+                {existingDnTemplates.length === 0 ? (
+                  <p className="text-xs text-slate-500">暂无</p>
+                ) : (
+                  <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
+                    {existingDnTemplates.map((dn) => (
+                      <div
+                        key={dn}
+                        className="flex items-center justify-between gap-2 rounded border border-amber-200 bg-amber-50 px-2 py-1.5"
+                      >
+                        <code className="text-[11px] text-amber-900 break-all">{dn}</code>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const ok = window.confirm(`确认删除该组织配置？\n\n${dn}`);
+                            if (!ok) return;
+                            void handleDeleteOrganization(dn);
+                          }}
+                          disabled={orgSaveLoading}
+                          className="shrink-0 px-2 py-1 text-[11px] rounded border border-red-200 text-red-600 hover:bg-red-50 disabled:opacity-60"
+                        >
+                          删除
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+              {orgSaveError && <p className="text-xs text-red-600">{orgSaveError}</p>}
+            </div>
+            <DialogFooter>
+              <button
+                type="button"
+                onClick={() => setOrgDialogOpen(false)}
+                className="px-3 py-2 text-sm rounded-md border border-slate-300 text-slate-700 hover:bg-slate-50"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={handleAddOrganization}
+                disabled={orgSaveLoading}
+                className="px-3 py-2 text-sm rounded-md bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60"
+              >
+                {orgSaveLoading ? '保存中...' : '保存到 jupyterhub_config.py'}
+              </button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       </div>
     );
   };
@@ -1207,7 +1612,7 @@ export default function JupyterHubDashboard() {
                   <div>
                     <div className="flex justify-between text-sm mb-1">
                       <span className="text-slate-600">CPU</span>
-                      <span className="font-medium text-slate-900">{node.cpu}%</span>
+                      <span className="font-medium text-slate-900">{formatOneDecimal(node.cpu)}%</span>
                     </div>
                     <div className="w-full bg-slate-200 rounded-full h-2">
                       <div
@@ -1219,7 +1624,7 @@ export default function JupyterHubDashboard() {
                   <div>
                     <div className="flex justify-between text-sm mb-1">
                       <span className="text-slate-600">内存</span>
-                      <span className="font-medium text-slate-900">{node.memory}%</span>
+                      <span className="font-medium text-slate-900">{formatOneDecimal(node.memory)}%</span>
                     </div>
                     <div className="w-full bg-slate-200 rounded-full h-2">
                       <div
@@ -1231,7 +1636,7 @@ export default function JupyterHubDashboard() {
                   <div>
                     <div className="flex justify-between text-sm mb-1">
                       <span className="text-slate-600">磁盘</span>
-                      <span className="font-medium text-slate-900">{node.disk}%</span>
+                      <span className="font-medium text-slate-900">{formatOneDecimal(node.disk)}%</span>
                     </div>
                     <div className="w-full bg-slate-200 rounded-full h-2">
                       <div
@@ -1255,6 +1660,14 @@ export default function JupyterHubDashboard() {
                     </button>
                   </div>
                 </div>
+                <button
+                  type="button"
+                  onClick={() => setMetricsTrend({ mode: 'node', nodeIp: node.ip })}
+                  className="mt-3 inline-flex items-center gap-1.5 text-xs font-medium text-blue-600 hover:text-blue-800"
+                >
+                  <Activity className="w-3.5 h-3.5" />
+                  资源趋势
+                </button>
               </div>
             ))}
           </div>
@@ -1477,7 +1890,7 @@ export default function JupyterHubDashboard() {
                           style={{ width: `${node.cpu}%` }}
                         />
                       </div>
-                      <span className="text-sm font-bold text-slate-900">{node.cpu}%</span>
+                      <span className="text-sm font-bold text-slate-900">{formatOneDecimal(node.cpu)}%</span>
                     </div>
                   </div>
                   <div>
@@ -1489,7 +1902,7 @@ export default function JupyterHubDashboard() {
                           style={{ width: `${node.memory}%` }}
                         />
                       </div>
-                      <span className="text-sm font-bold text-slate-900">{node.memory}%</span>
+                      <span className="text-sm font-bold text-slate-900">{formatOneDecimal(node.memory)}%</span>
                     </div>
                   </div>
                   <div>
@@ -1501,7 +1914,7 @@ export default function JupyterHubDashboard() {
                           style={{ width: `${node.disk}%` }}
                         />
                       </div>
-                      <span className="text-sm font-bold text-slate-900">{node.disk}%</span>
+                      <span className="text-sm font-bold text-slate-900">{formatOneDecimal(node.disk)}%</span>
                     </div>
                   </div>
                 </div>
@@ -1656,15 +2069,6 @@ export default function JupyterHubDashboard() {
   );
 
   const renderUsers = () => {
-    const doFetchUserStats = () => {
-      setUserStatsLoading(true);
-      fetch(buildApiUrl('/api/dashboard/user-stats'))
-        .then((r) => r.json())
-        .then((data: UserStatsData) => setUserStatsData(data))
-        .catch(() => { })
-        .finally(() => setUserStatsLoading(false));
-    };
-
     const handleCleanupPreview = async () => {
       setCleanupLoading(true);
       setCleanupPreview(null);
@@ -1696,7 +2100,7 @@ export default function JupyterHubDashboard() {
         });
         const data = await res.json();
         setCleanupResults(data.results ?? []);
-        doFetchUserStats();
+        void fetchUserStats();
       } catch {
         setCleanupResults([]);
       } finally {
@@ -1812,7 +2216,7 @@ export default function JupyterHubDashboard() {
                   </SelectContent>
                 </Select>
                 <button
-                  onClick={doFetchUserStats}
+                  onClick={() => void fetchUserStats()}
                   disabled={userStatsLoading}
                   className="flex items-center gap-2 px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-60"
                 >
@@ -1889,9 +2293,7 @@ export default function JupyterHubDashboard() {
                                 </span>
                               </div>
                               <div className="text-xs text-slate-600 whitespace-nowrap">
-                                {user.memLimitMiB >= 1024
-                                  ? `${(user.memUsageMiB / 1024).toFixed(2)} / ${(user.memLimitMiB / 1024).toFixed(1)} GiB`
-                                  : `${Math.round(user.memUsageMiB)} / ${Math.round(user.memLimitMiB)} MiB`}
+                                {formatUserMemoryGb(user.memUsageMiB, user.memLimitMiB)}
                               </div>
                             </div>
                           ) : (
@@ -1908,6 +2310,14 @@ export default function JupyterHubDashboard() {
                         </td>
                         <td className="py-4 px-4">
                           <div className="flex flex-wrap items-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => setMetricsTrend({ mode: 'user', username: user.username })}
+                              className="flex items-center gap-1 px-3 py-1.5 text-xs bg-indigo-50 text-indigo-700 rounded-lg hover:bg-indigo-100 transition-colors"
+                            >
+                              <Activity className="w-3 h-3" />
+                              趋势
+                            </button>
                             {user.status === 'running' &&
                               user.containerName &&
                               swarmServiceNameFromContainerName(user.containerName) && (
@@ -1931,7 +2341,7 @@ export default function JupyterHubDashboard() {
                                     body: JSON.stringify({ action: 'stop', username: user.username }),
                                   });
                                   setUserActionLoading(null);
-                                  doFetchUserStats();
+                                  void fetchUserStats();
                                 }}
                                 disabled={userActionLoading === user.username}
                                 className="flex items-center gap-1 px-3 py-1.5 text-xs bg-red-100 text-red-700 rounded-lg hover:bg-red-200 transition-colors disabled:opacity-60"
@@ -1950,7 +2360,7 @@ export default function JupyterHubDashboard() {
                                     body: JSON.stringify({ action: 'start', username: user.username }),
                                   });
                                   setUserActionLoading(null);
-                                  doFetchUserStats();
+                                  void fetchUserStats();
                                 }}
                                 disabled={userActionLoading === user.username}
                                 className="flex items-center gap-1 px-3 py-1.5 text-xs bg-green-100 text-green-700 rounded-lg hover:bg-green-200 transition-colors disabled:opacity-60"
@@ -1986,9 +2396,7 @@ export default function JupyterHubDashboard() {
                         <span className="font-medium">{user.username}</span>
                         <span>
                           ({((user.memUsageMiB / user.memLimitMiB) * 100).toFixed(1)}% -{' '}
-                          {user.memLimitMiB >= 1024
-                            ? `${(user.memUsageMiB / 1024).toFixed(2)} / ${(user.memLimitMiB / 1024).toFixed(1)} GiB`
-                            : `${Math.round(user.memUsageMiB)} / ${Math.round(user.memLimitMiB)} MiB`})
+                          {formatUserMemoryGb(user.memUsageMiB, user.memLimitMiB)})
                         </span>
                       </li>
                     ))}
@@ -2736,6 +3144,15 @@ export default function JupyterHubDashboard() {
         </div>
         {renderContent()}
       </div>
+      <MetricsTrendSheet
+        open={metricsTrend !== null}
+        onOpenChange={(open) => {
+          if (!open) setMetricsTrend(null);
+        }}
+        mode={metricsTrend?.mode ?? 'node'}
+        nodeIp={metricsTrend?.nodeIp}
+        username={metricsTrend?.username}
+      />
     </div>
   );
 }

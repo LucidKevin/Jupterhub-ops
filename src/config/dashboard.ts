@@ -4,7 +4,7 @@
 
 import { CLUSTER_NODES_CONFIG } from '@/config/cluster';
 
-export const DASHBOARD_REFRESH_INTERVAL_MS = 30_000;
+export const DASHBOARD_REFRESH_INTERVAL_MS = 10_000;
 export const TOAST_HIDE_DELAY_MS = 3_000;
 
 export const CLEANUP_THRESHOLD_OPTIONS = [3, 7, 15, 30] as const;
