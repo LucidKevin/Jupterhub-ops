@@ -9,7 +9,7 @@
  * 2. SSH docker stats（每个 worker 节点）
  *    - `docker stats --no-stream --format "{{json .}}"` 获取容器 CPU / 内存数据
  *    - 容器名格式：jupyter-{username}.{server_suffix}
- *      → 通过正则 /^jupyter-([^.]+)\./ 提取 username 后与 JupyterHub 用户匹配
+ *      → 通过解析函数提取 username 后与 JupyterHub 用户匹配（兼容有/无后缀）
  *
  * 3. Node Exporter（每个 worker 节点，端口 9100）
  *    - node_memory_MemTotal_bytes / node_memory_MemAvailable_bytes
@@ -45,6 +45,7 @@ import { CLUSTER_NODES_CONFIG, JUPYTERHUB_CONFIG, NODE_EXPORTER_PORT } from '@/c
 import { API_TIMEOUT_MS, SSH_PORT } from '@/config/service';
 import { requireAdmin } from '@/lib/guard';
 import { fetchJupyterHubUsers } from '@/lib/jupyterhub-client';
+import { parseJupyterUsernameFromContainerName } from '@/lib/jupyter-container-name';
 import { tryFetchNodeExporterMetrics } from '@/lib/prometheus-node-metrics';
 
 const execAsync = promisify(exec);
@@ -95,8 +96,8 @@ async function fetchWorkerContainerStats(ip: string): Promise<
       .flatMap((line) => {
         try {
           const entry = JSON.parse(line) as DockerStatEntry;
-          // 只处理 JupyterHub 用户容器
-          if (!entry.Name.startsWith('jupyter-')) return [];
+          // 只处理能解析出 Jupyter 用户名的容器（兼容带栈前缀）
+          if (!parseJupyterUsernameFromContainerName(entry.Name)) return [];
           const [usage, limit] = entry.MemUsage.split(' / ');
           return [{
             name: entry.Name,
@@ -131,8 +132,9 @@ export async function GET() {
   const auth = requireAdmin();
   if (auth.error) return auth.error;
   const workerNodes = CLUSTER_NODES_CONFIG.filter((n) => n.role === 'worker');
+  const dockerStatNodes = workerNodes;
 
-  // 并发请求：JupyterHub 用户列表 + 各 worker 节点的容器统计和内存数据
+  // 并发请求：JupyterHub 用户列表 + worker 节点容器统计和内存数据
   const [jupyterResult, ...workerResults] = await Promise.allSettled([
     fetchJupyterHubUsers({
       apiUrl: JUPYTERHUB_CONFIG.apiUrl,
@@ -142,7 +144,7 @@ export async function GET() {
       if (!r.ok) throw new Error(r.error);
       return r.users as JupyterUser[];
     }),
-    ...workerNodes.map(async (node) => ({
+    ...dockerStatNodes.map(async (node) => ({
       ip: node.ip,
       stats: await fetchWorkerContainerStats(node.ip),
       memory: await fetchWorkerMemoryGB(node.ip),
@@ -177,10 +179,7 @@ export async function GET() {
   // 容器名格式 jupyter-{username}.{suffix}，用正则提取 username
   const users = jupyterUsers.map((u) => {
     const isRunning = u.servers && Object.keys(u.servers).length > 0;
-    const container = allContainerStats.find((c) => {
-      const match = c.name.match(/^jupyter-([^.]+)\./);
-      return match?.[1] === u.name;
-    });
+    const container = allContainerStats.find((c) => parseJupyterUsernameFromContainerName(c.name) === u.name);
     return {
       username: u.name,
       admin: u.admin,

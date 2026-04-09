@@ -363,6 +363,8 @@ export default function JupyterHubDashboard() {
   const [userStatsData, setUserStatsData] = useState<UserStatsData | null>(null);
   const [userStatsLoading, setUserStatsLoading] = useState(false);
   const [userNodeFilter, setUserNodeFilter] = useState<'all' | string>('all');
+  const [userListPage, setUserListPage] = useState(1);
+  const [userListPageSize, setUserListPageSize] = useState<'10' | '20' | '50'>('20');
   const userStatsFetchInFlightRef = useRef(false);
 
   const userLogScrollRef = useRef<HTMLDivElement>(null);
@@ -460,6 +462,10 @@ export default function JupyterHubDashboard() {
     const id = setInterval(() => void fetchUserStats(), DASHBOARD_REFRESH_INTERVAL_MS);
     return () => clearInterval(id);
   }, [activeTab, fetchUserStats]);
+
+  useEffect(() => {
+    setUserListPage(1);
+  }, [userNodeFilter, userListPageSize]);
 
   const fetchLogDates = useCallback(async () => {
     try {
@@ -2115,6 +2121,10 @@ export default function JupyterHubDashboard() {
       userNodeFilter === 'all'
         ? runningUsers
         : runningUsers.filter((u) => u.node === userNodeFilter);
+    const pageSize = Number(userListPageSize);
+    const totalUserPages = Math.max(1, Math.ceil(visibleUsers.length / pageSize));
+    const currentUserPage = Math.min(userListPage, totalUserPages);
+    const pagedUsers = visibleUsers.slice((currentUserPage - 1) * pageSize, currentUserPage * pageSize);
     const usedMemGB = userStatsData?.workerMemUsedGB ?? 0;
     const totalMemGB = userStatsData?.workerMemTotalGB ?? 0;
     const userLogSearchDays = Math.max(1, Math.round(USER_SERVICE_LOGS.searchSinceHours / 24));
@@ -2215,6 +2225,21 @@ export default function JupyterHubDashboard() {
                     ))}
                   </SelectContent>
                 </Select>
+                <span className="text-xs font-medium text-slate-500 whitespace-nowrap">每页</span>
+                <Select value={userListPageSize} onValueChange={(v: '10' | '20' | '50') => setUserListPageSize(v)}>
+                  <SelectTrigger className="h-9 w-[5.5rem] rounded-lg border-slate-200 bg-slate-50 text-slate-800 text-sm shadow-sm hover:bg-white focus:ring-2 focus:ring-blue-500/25">
+                    <SelectValue placeholder="20" />
+                  </SelectTrigger>
+                  <SelectContent
+                    position="popper"
+                    sideOffset={6}
+                    className="rounded-xl border border-slate-200 bg-white p-1 shadow-lg min-w-[var(--radix-select-trigger-width)]"
+                  >
+                    <SelectItem value="10" className="rounded-lg py-2 pl-3 pr-8 text-slate-800">10</SelectItem>
+                    <SelectItem value="20" className="rounded-lg py-2 pl-3 pr-8 text-slate-800">20</SelectItem>
+                    <SelectItem value="50" className="rounded-lg py-2 pl-3 pr-8 text-slate-800">50</SelectItem>
+                  </SelectContent>
+                </Select>
                 <button
                   onClick={() => void fetchUserStats()}
                   disabled={userStatsLoading}
@@ -2232,6 +2257,7 @@ export default function JupyterHubDashboard() {
             ) : visibleUsers.length === 0 ? (
               <div className="text-sm text-slate-400 text-center py-8">暂无该节点运行中用户数据</div>
             ) : (
+              <>
               <div className="overflow-x-auto">
                 <table className="w-full">
                   <thead>
@@ -2247,7 +2273,7 @@ export default function JupyterHubDashboard() {
                     </tr>
                   </thead>
                   <tbody>
-                    {visibleUsers.map((user) => (
+                    {pagedUsers.map((user) => (
                       <tr key={user.username} className="border-b border-slate-100 hover:bg-slate-50">
                         <td className="py-4 px-4">
                           <div className="flex items-center gap-3">
@@ -2376,6 +2402,30 @@ export default function JupyterHubDashboard() {
                   </tbody>
                 </table>
               </div>
+              <div className="mt-4 flex items-center justify-between gap-3 flex-wrap">
+                <div className="text-xs text-slate-500">
+                  共 {visibleUsers.length} 条，第 {currentUserPage} / {totalUserPages} 页
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setUserListPage((p) => Math.max(1, p - 1))}
+                    disabled={currentUserPage <= 1}
+                    className="px-3 py-1.5 text-xs rounded-lg border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    上一页
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setUserListPage((p) => Math.min(totalUserPages, p + 1))}
+                    disabled={currentUserPage >= totalUserPages}
+                    className="px-3 py-1.5 text-xs rounded-lg border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    下一页
+                  </button>
+                </div>
+              </div>
+              </>
             )}
           </div>
         </div>

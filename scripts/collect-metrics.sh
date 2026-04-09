@@ -67,9 +67,11 @@ NODE="$(resolve_node)" || {
   echo "collect-metrics: 找不到 node。请设置 NODE_BINARY=/绝对路径/node 或在 crontab 里设置 PATH。" >&2
   exit 1
 }
+echo "collect-metrics: node=$NODE cwd=$ROOT" >&2
 
 BUNDLE="$ROOT/scripts/collect-metrics.cjs"
 if [ -f "$BUNDLE" ]; then
+  echo "collect-metrics: exec_mode=cjs target=$BUNDLE" >&2
   exec "$NODE" "$BUNDLE"
 fi
 
@@ -78,4 +80,5 @@ CLI="$(resolve_tsx_cli)" || {
   exit 1
 }
 
+echo "collect-metrics: exec_mode=tsx target=scripts/collect-metrics.ts cli=$CLI" >&2
 exec "$NODE" "$CLI" --tsconfig tsconfig.json scripts/collect-metrics.ts
