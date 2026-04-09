@@ -1,3 +1,10 @@
+/**
+ * docker service logs 文本处理工具：
+ * - stdout/stderr 合并
+ * - 行时间解析
+ * - 稳定排序
+ * - 下一页游标生成
+ */
 /** 与 Docker --timestamps 常见前缀一致（行首 ISO 时间） */
 const LINE_TS_PREFIX =
   /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}(?::\d{2})?))/;
@@ -21,6 +28,7 @@ export function mergeDockerCliLogStreams(stdout: string, stderr: string): string
 }
 
 export function parseDockerServiceLogLineTimeMs(line: string): number {
+  // 优先解析 docker --timestamps 行首 ISO 时间
   const isoHead = line.match(LINE_TS_PREFIX);
   if (isoHead) {
     const t = Date.parse(isoHead[1]);
@@ -28,6 +36,7 @@ export function parseDockerServiceLogLineTimeMs(line: string): number {
   }
   const jpy = line.match(JUPYTER_LOG_BRACKET);
   if (jpy) {
+    // 兜底解析 Jupyter 自带 `[I 2026-.. ..]` 时间片段
     const t = Date.parse(`${jpy[2]}T${jpy[3]}`);
     if (Number.isFinite(t)) return t;
   }

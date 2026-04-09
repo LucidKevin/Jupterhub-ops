@@ -1,3 +1,9 @@
+/**
+ * 指标 SQLite 读写层（sql.js/WASM）：
+ * - 初始化数据库与 schema
+ * - 做轻量迁移（补缺失列）
+ * - 供采集脚本写入、API 查询历史数据
+ */
 import fs from 'fs';
 import path from 'path';
 import type { Database } from 'sql.js';
@@ -36,6 +42,7 @@ CREATE TABLE IF NOT EXISTS user_metric_points (
 CREATE INDEX IF NOT EXISTS idx_user_metric_user_ts ON user_metric_points (username, ts);
 `;
 
+/** sql.js 初始化 Promise（单例），避免重复加载 wasm。 */
 let initPromise: Promise<Awaited<ReturnType<(typeof import('sql.js'))['default']>>> | null = null;
 
 /** 不用 createRequire（Next 打包时可能解析失败），在磁盘上找 sql-wasm.wasm */
@@ -80,6 +87,7 @@ async function getSqlJs() {
   return initPromise;
 }
 
+/** 检查表是否存在某列。 */
 function tableHasColumn(db: Database, table: string, column: string): boolean {
   const stmt = db.prepare(`PRAGMA table_info(${table})`);
   let exists = false;
@@ -94,12 +102,14 @@ function tableHasColumn(db: Database, table: string, column: string): boolean {
   return exists;
 }
 
+/** 若列不存在则补列（用于历史库平滑迁移）。 */
 function ensureColumn(db: Database, table: string, column: string, typeDef: string) {
   if (!tableHasColumn(db, table, column)) {
     db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${typeDef}`);
   }
 }
 
+/** 当前项目指标库迁移入口。 */
 function migrateMetricsSchema(db: Database): void {
   ensureColumn(db, 'node_metric_points', 'cpu_max', 'REAL');
   ensureColumn(db, 'node_metric_points', 'cpu_p95', 'REAL');
@@ -133,6 +143,7 @@ export async function openMetricsSqlDatabase(): Promise<Database> {
 }
 
 export function persistMetricsDatabase(db: Database): void {
+  // sql.js 在内存里工作，需显式 export 到磁盘文件
   const data = db.export();
   fs.writeFileSync(METRICS_SQLITE_PATH, Buffer.from(data));
 }
@@ -167,6 +178,7 @@ function stmtAll<T extends Record<string, unknown>>(
   sql: string,
   params: (string | number | null)[]
 ): T[] {
+  // 通用查询 helper：bind 参数并拉取所有行
   const stmt = db.prepare(sql);
   stmt.bind(params);
   const rows: T[] = [];

@@ -10,12 +10,17 @@ import https from 'https';
 import { URL } from 'url';
 
 export interface HttpGetResult {
+  /** HTTP 状态是否 2xx。 */
   ok: boolean;
+  /** HTTP 状态码。 */
   status: number;
+  /** HTTP 状态描述（如 OK / Not Found）。 */
   statusText: string;
+  /** 延迟读取响应体文本。 */
   text(): Promise<string>;
 }
 
+/** 用 Node 原生 http/https 发起 GET 请求，带超时与自定义请求头。 */
 export function httpGet(
   urlStr: string,
   options: { timeoutMs: number; headers?: Record<string, string> }

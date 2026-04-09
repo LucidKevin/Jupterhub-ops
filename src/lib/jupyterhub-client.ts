@@ -5,12 +5,21 @@
 import { httpGet } from './http-fetch';
 
 export interface JupyterHubUserListItem {
+  /** JupyterHub 用户名。 */
   name: string;
+  /** 运行中的 server 信息（空对象表示无运行服务）。 */
   servers: Record<string, unknown>;
+  /** 是否管理员。 */
   admin: boolean;
+  /** 最后活跃时间（可能为空）。 */
   last_activity?: string | null;
 }
 
+/**
+ * 拉取 Hub 用户列表并统一错误结构：
+ * - 成功: { ok: true, users }
+ * - 失败: { ok: false, error }
+ */
 export async function fetchJupyterHubUsers(options: {
   apiUrl: string;
   token: string;

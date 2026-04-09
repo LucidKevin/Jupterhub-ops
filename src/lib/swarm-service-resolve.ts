@@ -1,3 +1,7 @@
+/**
+ * Swarm service 名称解析：
+ * 将短名 `jupyter-xxx` 变为日志命令可用名称（必要时补 stack 前缀）。
+ */
 import { SWARM_STACK_NAME } from '@/config/service';
 
 /**

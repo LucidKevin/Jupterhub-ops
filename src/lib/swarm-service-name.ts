@@ -3,6 +3,7 @@
  * 若命名与栈前缀不一致，需在集群侧对齐或后续扩展配置。
  */
 export function swarmServiceNameFromContainerName(containerName: string | null): string | null {
+  // 仅处理 JupyterHub 用户容器命名
   if (!containerName || !containerName.startsWith('jupyter-')) return null;
   const segment = containerName.split('.')[0];
   if (!segment || !/^jupyter-[a-zA-Z0-9_-]+$/.test(segment)) return null;

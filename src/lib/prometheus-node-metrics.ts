@@ -5,7 +5,9 @@
 import { httpGet } from './http-fetch';
 
 export interface MetricEntry {
+  /** Prometheus labels（如 mode/mountpoint/fstype 等）。 */
   labels: Record<string, string>;
+  /** 指标值。 */
   value: number;
 }
 
@@ -13,6 +15,7 @@ function round2(n: number): number {
   return Math.round(n * 100) / 100;
 }
 
+/** Prometheus 文本解析为 `metric_name -> entry[]` 结构。 */
 export function parsePrometheusMetrics(text: string): Map<string, MetricEntry[]> {
   const result = new Map<string, MetricEntry[]>();
 
@@ -43,6 +46,7 @@ export function parsePrometheusMetrics(text: string): Map<string, MetricEntry[]>
   return result;
 }
 
+/** 汇总 CPU total/idle 秒数，供 delta 计算。 */
 export function getCpuSeconds(metrics: Map<string, MetricEntry[]>) {
   const entries = metrics.get('node_cpu_seconds_total') || [];
   let idle = 0;
@@ -104,6 +108,7 @@ export async function tryFetchNodeExporterMetrics(
   port: number,
   timeoutMs: number
 ): Promise<FetchNodeExporterResult> {
+  // 错误时返回结构化 error，方便上层打印诊断日志
   const url = `http://${ip}:${port}/metrics`;
   try {
     const res = await httpGet(url, { timeoutMs });
@@ -122,6 +127,7 @@ export async function fetchNodeExporterMetrics(
   port: number,
   timeoutMs: number
 ): Promise<Map<string, MetricEntry[]> | null> {
+  // 兼容旧调用方：仅返回 metrics，不返回 error
   const r = await tryFetchNodeExporterMetrics(ip, port, timeoutMs);
   return r.metrics;
 }

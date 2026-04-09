@@ -1,3 +1,9 @@
+/**
+ * docker service logs 调用封装：
+ * - 构建参数
+ * - 执行命令并统一返回 stdout/stderr/code
+ * - 对日志分页（since 近似 until）提供能力
+ */
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { USER_SERVICE_LOGS } from '@/config/service';
@@ -8,6 +14,7 @@ import {
 
 const execFileAsync = promisify(execFile);
 
+/** 输入 service 名白名单校验，避免命令注入风险。 */
 export function assertValidSwarmServiceName(raw: string): string {
   const s = raw.trim();
   if (!s || s.length > 200) throw new Error('非法 service 名');
@@ -17,6 +24,7 @@ export function assertValidSwarmServiceName(raw: string): string {
 
 export { isoUntilBeforeLine, sortLogLinesAscending };
 
+/** 组装 `docker service logs` 参数（兼容不支持 `--until` 的版本）。 */
 function buildDockerArgs(options: {
   service: string;
   tail: number;
@@ -55,6 +63,7 @@ export async function runDockerServiceLogs(options: {
   untilIso?: string;
   maxBuffer: number;
 }): Promise<{ stdout: string; stderr: string; code: number }> {
+  // 普通浏览日志：tail + (可选) since 窗口
   const args = buildDockerArgs(options);
   try {
     const { stdout, stderr } = await execFileAsync('docker', args, {
@@ -78,6 +87,7 @@ export async function runDockerServiceLogsForSearch(options: {
   sinceHours: number;
   maxBuffer: number;
 }): Promise<{ stdout: string; stderr: string; code: number }> {
+  // 搜索日志：固定 sinceHours 范围，不做 until 游标逻辑
   const sinceArg = `${Math.min(Math.max(options.sinceHours, 1), 24 * 90)}h`;
   const args = [
     'service',
